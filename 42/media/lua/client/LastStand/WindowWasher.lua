@@ -96,7 +96,7 @@ local initialized = false
 -- ===== Platform state & params =====
 WindowWasher.ps = {
     cx = nil, cy = nil, cz = nil,          -- current center
-    size = 5,                              -- odd: 3/5/7
+    size = 6,                              -- odd: 3/5/7
     orient = "EW",                         -- "EW" or "NS"
     sprite = "constructedobjects_01_86",   -- metal floor sprite
     objs = {},                             -- created floor objects (to remove)
@@ -161,6 +161,14 @@ function WindowWasher.OnGameStart()
     end
 end
 
+-- вместо "half" будем везде считать left/right
+local function WW_spanLR(sz)
+    sz = math.max(1, tonumber(sz) or 5)
+    local left  = math.floor((sz - 1) / 2)   -- сколько тайлов уйдёт в «минус»
+    local right = sz - left - 1              -- сколько тайлов уйдёт в «плюс»
+    return left, right, sz
+end
+
 -- ===== Floor placement (single tile) =====
 function WindowWasher.createSingleMetalFloor(x, y, z)
     local sq = getSquare(x, y, z)
@@ -206,18 +214,14 @@ end
 -- Торцевые перила (заглушки)
 function WindowWasher.buildRailsCaps(cx, cy, cz)
     if not (WindowWasher.rails and WindowWasher.rails.enabled) then return end
-    local half = math.floor((WindowWasher.ps.size - 1) / 2)
+    local left, right = WW_spanLR(WindowWasher.ps.size)
 
     if WindowWasher.ps.orient == "EW" then
-        -- западный торец: W на самой клетке торца
-        addFenceW(cx - half,     cy, cz)
-        -- восточный торец: W на соседе справа (даёт «E» на торце)
-        addFenceW(cx + half + 1, cy, cz)
-    else -- "NS"
-        -- северный торец: N на самой клетке торца
-        addFenceN(cx, cy - half,     cz)
-        -- южный торец: N на соседе снизу (даёт «S» на торце)
-        addFenceN(cx, cy + half + 1, cz)
+        addFenceW(cx - left,     cy, cz)     -- западный торец
+        addFenceW(cx + right + 1, cy, cz)    -- восточный торец как «W» у соседа справа
+    else
+        addFenceN(cx, cy - left,     cz)     -- северный торец
+        addFenceN(cx, cy + right + 1, cz)    -- южный торец как «N» у соседа снизу
     end
 end
 
@@ -238,35 +242,30 @@ end
 -- Ставим перила вдоль длинных сторон платформы
 function WindowWasher.buildRailsAlongLine(cx, cy, cz)
     if not (WindowWasher.rails and WindowWasher.rails.enabled) then return end
-    local half = math.floor((WindowWasher.ps.size - 1) / 2)
+    local left, right = WW_spanLR(WindowWasher.ps.size)
 
     if WindowWasher.ps.orient == "EW" then
-        -- пол идёт вдоль X
         local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.EW) or "S"
-        for x = cx - half, cx + half do
+        for x = cx - left, cx + right do
             if side == "N" then
-                -- перила по северной кромке самой строки плит (внутренняя к стене)
                 addFenceN(x, cy, cz)
-            else -- "S"
-                -- «южная кромка» = север соседней клетки снизу
-                addFenceN(x, cy + 1, cz)
+            else
+                addFenceN(x, cy + 1, cz) -- S = север соседа снизу
             end
         end
-
     else
-        -- пол идёт вдоль Y
         local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.NS) or "E"
-        for y = cy - half, cy + half do
+        for y = cy - left, cy + right do
             if side == "W" then
-                -- перила по западной кромке
                 addFenceW(cx, y, cz)
-            else -- "E"
-                -- «восточная кромка» = запад соседней клетки справа
-                addFenceW(cx + 1, y, cz)
+            else
+                addFenceW(cx + 1, y, cz) -- E = запад соседа справа
             end
         end
     end
 end
+
+
 -- ===== Platform build / remove =====
 function WindowWasher.destroyPlatform()
     -- пол
@@ -285,19 +284,20 @@ end
 function WindowWasher.buildPlatformAt(cx, cy, cz)
     WindowWasher.ps.cx, WindowWasher.ps.cy, WindowWasher.ps.cz = cx, cy, cz
     WindowWasher.ps.objs = {}
-    local half = math.floor((WindowWasher.ps.size - 1) / 2)
+    local left, right = WW_spanLR(WindowWasher.ps.size)
+
     if WindowWasher.ps.orient == "NS" then
-        for i = -half, half do
+        for i = -left, right do
             local obj = WindowWasher.createSingleMetalFloor(cx, cy + i, cz)
             if obj then table.insert(WindowWasher.ps.objs, obj) end
         end
     else
-        for i = -half, half do
+        for i = -left, right do
             local obj = WindowWasher.createSingleMetalFloor(cx + i, cy, cz)
             if obj then table.insert(WindowWasher.ps.objs, obj) end
         end
     end
-    -- после пола — поставить перила
+
     WindowWasher.buildRailsAlongLine(cx, cy, cz)
     WindowWasher.buildRailsCaps(cx, cy, cz)
 end
@@ -311,23 +311,31 @@ end
 
 -- Проверка: все целевые квадраты загружены (учитываем и клетки для перил)
 local function squaresExistFor(cx, cy, cz, size, orient)
-    local half = math.floor((size - 1) / 2)
+    local left, right = WW_spanLR(size)
     if orient == "NS" then
-        for i = -half, half do
-            if not getSquare(cx, cy + i, cz) then return false end          -- пол
-            if not getSquare(cx + 1, cy + i, cz) then return false end      -- перила справа (E как W соседа)
+        local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.NS) or "E"
+        for y = cy - left, cy + right do
+            if not getSquare(cx, y, cz) then return false end              -- пол
+            if side == "W" then
+                if not getSquare(cx, y, cz) then return false end          -- перила на самой клетке
+            else
+                if not getSquare(cx + 1, y, cz) then return false end      -- перила на соседе справа
+            end
         end
-        -- торцы: север (сам), юг (сосед снизу)
-        if not getSquare(cx, cy - half,     cz) then return false end
-        if not getSquare(cx, cy + half + 1, cz) then return false end
-    else -- "EW"
-        for i = -half, half do
-            if not getSquare(cx + i, cy, cz) then return false end          -- пол
-            if not getSquare(cx + i, cy + 1, cz) then return false end      -- перила снизу (S как N соседа)
+        if not getSquare(cx, cy - left,     cz) then return false end      -- северный торец
+        if not getSquare(cx, cy + right + 1, cz) then return false end     -- южный торец (сосед снизу)
+    else
+        local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.EW) or "S"
+        for x = cx - left, cx + right do
+            if not getSquare(x, cy, cz) then return false end              -- пол
+            if side == "N" then
+                if not getSquare(x, cy, cz) then return false end          -- перила на самой клетке
+            else
+                if not getSquare(x, cy + 1, cz) then return false end      -- перила на соседе снизу
+            end
         end
-        -- торцы: запад (сам), восток (сосед справа)
-        if not getSquare(cx - half,     cy, cz) then return false end
-        if not getSquare(cx + half + 1, cy, cz) then return false end
+        if not getSquare(cx - left,     cy, cz) then return false end      -- западный торец
+        if not getSquare(cx + right + 1, cy, cz) then return false end     -- восточный торец (сосед справа)
     end
     return true
 end
@@ -335,14 +343,14 @@ end
 -- Клетки, на которых лежит настил платформы (без перил)
 local function getPlatformSquares(cx, cy, cz, size, orient)
     local list = {}
-    local half = math.floor((size - 1) / 2)
+    local left, right = WW_spanLR(size)
     if orient == "EW" then
-        for x = cx - half, cx + half do
+        for x = cx - left, cx + right do
             local sq = getSquare(x, cy, cz)
             if sq then table.insert(list, sq) end
         end
-    else -- "NS"
-        for y = cy - half, cy + half do
+    else
+        for y = cy - left, cy + right do
             local sq = getSquare(cx, y, cz)
             if sq then table.insert(list, sq) end
         end
@@ -730,11 +738,11 @@ local function WW_isPlatformSquare(sq)
     if not sq then return false end
     local x,y,z = sq:getX(), sq:getY(), sq:getZ()
     if z ~= WindowWasher.ps.cz then return false end
-    local half = math.floor((WindowWasher.ps.size - 1) / 2)
+    local left, right = WW_spanLR(WindowWasher.ps.size)
     if WindowWasher.ps.orient == "EW" then
-        return (y == WindowWasher.ps.cy) and (x >= WindowWasher.ps.cx - half) and (x <= WindowWasher.ps.cx + half)
+        return (y == WindowWasher.ps.cy) and (x >= WindowWasher.ps.cx - left) and (x <= WindowWasher.ps.cx + right)
     else
-        return (x == WindowWasher.ps.cx) and (y >= WindowWasher.ps.cy - half) and (y <= WindowWasher.ps.cy + half)
+        return (x == WindowWasher.ps.cx) and (y >= WindowWasher.ps.cy - left) and (y <= WindowWasher.ps.cy + right)
     end
 end
 
@@ -1223,7 +1231,7 @@ WindowWasher.AddPlayer = function(playerNum, playerObj)
     local function delayedTeleport()
         local cx, cy, cz = WindowWasher.x, WindowWasher.y, WindowWasher.z
 
-        WindowWasher.ps.size   = 5
+        WindowWasher.ps.size   = 6
         WindowWasher.ps.orient = "EW"
         WindowWasher.ps.sprite = "constructedobjects_01_86"
 
@@ -1246,7 +1254,7 @@ WindowWasher.gameMode = "Window Washer";
 WindowWasher.world = "Muldraugh, KY";
 
 -- spawn coordinates in Louisville
-WindowWasher.x = 12785;
+WindowWasher.x = 12782;
 WindowWasher.y = 1539;
 WindowWasher.z = 24;
 WindowWasher.hourOfDay = 7;
