@@ -1,0 +1,8 @@
+name=Window Washer Challenge
+id=WindowWasherChallenge
+description=The world ended while you were at work. You’re stuck on a scaffold, outside a skyscraper. Get in. Survive.
+poster=poster.png
+lua = shared/WindowWasherProfession.lua
+lua = client
+icon=true
+version=1.0

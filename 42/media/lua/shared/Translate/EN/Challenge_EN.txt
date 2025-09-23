@@ -1,0 +1,4 @@
+Challenge_EN = {
+Challenge_WindowWasher_name="Window Washer"
+Challenge_WindowWasher_desc="The world ended while you were at work. You're stuck on a scaffold, outside a skyscraper. Get in. Survive."
+}
