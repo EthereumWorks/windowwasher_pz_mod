@@ -654,13 +654,17 @@ local function moveSimpleTileObjects(sqFrom, sqTo, platformSprite, railN, railW)
     if sqTo.RecalcAllWithNeighbours   then sqTo:RecalcAllWithNeighbours(true)   end
 end
 
-
 -- ==== BLOOD DECAL FALLBACK (для билдов без addBloodSplat) ====
 WindowWasher.bloodDecal = {
     enabled = true,
     maxPerSquare = (math and math.huge) or 1e9,   -- чтобы не заспамить клетку
     sprites = nil       -- заполним автоматически из overlay_blood_floor_01_*
 }
+
+-- Кластерная заливка крови по соседним клеткам платформы:
+WindowWasher.bloodDecal.clusterSpan = 1   -- 1 = центр + соседи на 1 клетку вдоль платформы (EW: x±1; NS: y±1)
+WindowWasher.bloodDecal.maxPerSquare = 8  -- больше «мяса», чтобы точно перекрывать движковые сплэты
+
 
 -- Сколько кровавых ОВЕРЛЕЕВ уже лежит на клетке
 function WindowWasher.countBloodOverlays(sq)
@@ -774,6 +778,41 @@ local function WW_ensureBloodOverlayOnSquare(sq)
 
     if sq.RecalcAllWithNeighbours then pcall(function() sq:RecalcAllWithNeighbours(true) end) end
     WW_logBlood("mirror: added %d overlays at %s", toAdd, (sq:getX()..","..sq:getY()..","..sq:getZ()))
+end
+
+-- Пробежка по соседним клеткам ВДОЛЬ платформы и постановка декалей
+local function WW_ensureBloodOverlayClusterOnPlatform(sq, span)
+    if not (sq and WindowWasher.bloodDecal and WindowWasher.bloodDecal.enabled) then return end
+
+    -- используем уже имеющуюся проверку: клетка входит в текущую полосу платформы?
+    if not WW_isPlatformSquare(sq) then return end
+
+    span = math.max(0, math.min(2, tonumber(WindowWasher.bloodDecal.clusterSpan or span or 1)))
+
+    local x0, y0, z = sq:getX(), sq:getY(), sq:getZ()
+    local function ensureAt(x, y)
+        local s = getSquare(x, y, z)
+        if s and WW_isPlatformSquare(s) then
+            WW_ensureBloodOverlayOnSquare(s)
+        end
+    end
+
+    -- центр
+    ensureAt(x0, y0)
+
+    -- соседи вдоль оси платформы (чтобы кластер «ехал» вместе с настилом)
+    local orient = WindowWasher.ps and WindowWasher.ps.orient or "EW"
+    if orient == "EW" then
+        for dx = 1, span do
+            ensureAt(x0 - dx, y0)
+            ensureAt(x0 + dx, y0)
+        end
+    else
+        for dy = 1, span do
+            ensureAt(x0, y0 - dy)
+            ensureAt(x0, y0 + dy)
+        end
+    end
 end
 
 -- любой признак движковой крови на клетке
@@ -905,39 +944,128 @@ function WindowWasher.moveBloodDecalsVerbose(sqFrom, sqTo)
     return moved
 end
 
+-- === IsoFloorBloodSplat helpers (chunk-level) ================================
+
+local function WW_getChunkAndListForSquare(sq)
+    if not (sq and sq.getChunk) then return nil, nil end
+    local ch = sq:getChunk(); if not ch then return nil, nil end
+    local list = nil
+    if ch.getFloorBloodSplats then
+        local ok, v = pcall(function() return ch:getFloorBloodSplats() end)
+        if ok then list = v end
+    end
+    if (not list) and ch.getBloodSplats then
+        local ok, v = pcall(function() return ch:getBloodSplats() end)
+        if ok then list = v end
+    end
+    return ch, list
+end
+
+local function WW_splatBelongsToSquare(s, X, Y, Z)
+    if not s then return false end
+    local sx = math.floor(tonumber(s.x) or -1)
+    local sy = math.floor(tonumber(s.y) or -1)
+    local sz = math.floor(tonumber(s.z) or -1)
+    return (sx == X) and (sy == Y) and (sz == Z)
+end
+
+
 -- попытаться убрать движковую кровь со старой клетки (перебором известных API)
 function WindowWasher.clearEngineBlood(sq)
     if not sq then return end
+    local X,Y,Z = sq:getX(), sq:getY(), sq:getZ()
 
-    -- 1) Нормальные варианты API клетки
-    local cleared = false
-    if pcall(function() if sq.RemoveAllBlood then sq:RemoveAllBlood() end end) then cleared = true end
-    if not cleared then
-        pcall(function() if sq.removeAllBlood then sq:removeAllBlood() end end)
+    -- A) Пытаемся удалить реальные IsoFloorBloodSplat из списка чанка
+    local _, list = WW_getChunkAndListForSquare(sq)
+    if list and list.size then
+        local okN, n = pcall(function() return list:size() end); n = (okN and n) or 0
+        if n > 0 then
+            local removed = 0
+            for i = n-1, 0, -1 do
+                local s = list:get(i)
+                if WW_splatBelongsToSquare(s, X, Y, Z) then
+                    pcall(function() list:remove(i) end)
+                    removed = removed + 1
+                end
+            end
+            if removed > 0 then
+                WW_logBlood("clearEngineBlood: removed %d splats @ (%d,%d,%d)", removed, X,Y,Z)
+            end
+        end
+    else
+        WW_logBlood("clearEngineBlood: chunk list not available @ (%d,%d,%d)", X,Y,Z)
     end
 
-    -- 2) Удалим спец-объекты BloodSplat/Blood, если такие используются в билде
+    -- B) Сбрасываем возможные счётчики/флаги у клетки
+    pcall(function() if sq.setBlood   then sq:setBlood(0)   end end)
+    pcall(function() if sq.setHasBlood then sq:setHasBlood(false) end end)
+
+    -- C) На всякий: убрать Blood/BloodSplat как спец-объекты
     pcall(function()
         local so = sq.getSpecialObjects and sq:getSpecialObjects()
-        if not (so and so.size) then return end
-        for i = so:size()-1, 0, -1 do
-            local o  = so:get(i)
-            local on = o and o.getObjectName and o:getObjectName() or ""
-            if on == "BloodSplat" or on == "Blood" then
-                if o.removeFromSquare then pcall(function() o:removeFromSquare() end) end
-                if sq.RemoveSpecialObject then pcall(function() sq:RemoveSpecialObject(o) end) end
-                if o.removeFromWorld  then pcall(function() o:removeFromWorld()  end) end
+        if so and so.size then
+            for i = so:size()-1, 0, -1 do
+                local o  = so:get(i)
+                local on = o and o.getObjectName and o:getObjectName() or ""
+                if on == "BloodSplat" or on == "Blood" then
+                    if o.removeFromSquare then o:removeFromSquare() end
+                    if sq.RemoveSpecialObject then sq:RemoveSpecialObject(o) end
+                    if o.removeFromWorld  then o:removeFromWorld()  end
+                end
             end
         end
     end)
 
-    -- 3) Сброс маркера, если он есть
-    pcall(function() if sq.setHasBlood then sq:setHasBlood(false) end end)
-
-    -- 4) Пересчет
+    -- D) Пересчёт визуала
     pcall(function() if sq.RecalcAllWithNeighbours then sq:RecalcAllWithNeighbours(true) end end)
 end
 
+-- === Deferred blood cleanup ===================================================
+WindowWasher._bloodClearQueue = WindowWasher._bloodClearQueue or {}
+
+local function WW_enqueueBloodClear(sq, ticks)
+    if not sq then return end
+    local key = string.format("%d:%d:%d", sq:getX(),sq:getY(),sq:getZ())
+    WindowWasher._bloodClearQueue[key] = { sq = sq, t = math.max(1, tonumber(ticks) or 2) }
+end
+
+local function WW_onTickBloodClear()
+    local any = false
+    for k, rec in pairs(WindowWasher._bloodClearQueue) do
+        if rec and rec.sq then
+            rec.t = rec.t - 1
+            if rec.t <= 0 then
+                WindowWasher.clearEngineBlood(rec.sq)
+                WindowWasher._bloodClearQueue[k] = nil
+            else
+                any = true
+            end
+        else
+            WindowWasher._bloodClearQueue[k] = nil
+        end
+    end
+    -- если очередь пуста — можно оставить обработчик висеть, он лёгкий
+end
+Events.OnTick.Add(WW_onTickBloodClear)
+
+function WindowWasher._mirrorBlood_OnWeaponHitCharacter(weapon, attacker, target, dmg)
+    if not (target and instanceof(target, "IsoZombie")) then return end
+    local sq = target.getSquare and target:getSquare() or nil
+    if sq and WW_isPlatformSquare(sq) then
+        WW_ensureBloodOverlayOnSquare(sq)
+        -- движок может дорисовать сплаты после события -> чистим с задержкой
+        WW_enqueueBloodClear(sq, 3)
+    end
+end
+
+function WindowWasher._mirrorBlood_OnZombieDead(zombie)
+    if not zombie then return end
+    local sq = zombie.getSquare and zombie:getSquare() or nil
+    if sq and WW_isPlatformSquare(sq) then
+        WW_ensureBloodOverlayOnSquare(sq)
+        WW_enqueueBloodClear(sq, 5)  -- смерть часто спавнит кровь кадром позже
+    end
+end
 
 -- Метка: это кровь-наложение (overlay_blood_floor_01_*)
 function WindowWasher.isBloodDecalSpriteName(name)
@@ -1025,25 +1153,25 @@ end
 
 -- зеркалим кровь при каждом ударе по зомби на нашей платформе
 function WindowWasher._mirrorBlood_OnWeaponHitCharacter(weapon, attacker, target, dmg)
-    -- целим только по зомби
     if not (target and instanceof(target, "IsoZombie")) then return end
     local sq = target.getSquare and target:getSquare() or nil
     if sq and WW_isPlatformSquare(sq) then
-        WW_ensureBloodOverlayOnSquare(sq)
-        -- мягкая попытка убрать «движковую» кровь (если движок её уже положил)
-        WindowWasher.clearEngineBlood(sq)
+        WW_ensureBloodOverlayClusterOnPlatform(sq, 1)  -- было: WW_ensureBloodOverlayOnSquare(sq)
+        -- движок всё равно может дорисовать сплэты кадром позже — можно оставить твой отложенный клинер,
+        -- но он и не нужен, если нас устраивает чисто визуальное перекрытие.
+        -- WW_enqueueBloodClear(sq, 3)
     end
 end
 
--- зеркалим кровь при смерти зомби на нашей платформе
 function WindowWasher._mirrorBlood_OnZombieDead(zombie)
     if not zombie then return end
     local sq = zombie.getSquare and zombie:getSquare() or nil
     if sq and WW_isPlatformSquare(sq) then
-        WW_ensureBloodOverlayOnSquare(sq)
-        WindowWasher.clearEngineBlood(sq)
+        WW_ensureBloodOverlayClusterOnPlatform(sq, 1)  -- было: WW_ensureBloodOverlayOnSquare(sq)
+        -- WW_enqueueBloodClear(sq, 5)
     end
 end
+
 
 -- регистрируем хуки один раз
 if not WindowWasher._bloodMirrorHooked then
@@ -1144,6 +1272,10 @@ function ISMovePlatformAction:perform()
     local toList = getPlatformSquares(tx, ty, tz, WindowWasher.ps.size, WindowWasher.ps.orient)
     movePlatformContentsLists(fromList, toList, tz, self.character, bloodSnap)
 
+    -- 2b) ДОЧИСТКА движковой крови с задержкой на обоих наборах клеток
+    for _, sq in ipairs(fromList) do WW_enqueueBloodClear(sq, 3) end
+    for _, sq in ipairs(toList)   do WW_enqueueBloodClear(sq, 3) end
+
     -- 3) Теперь можно снести СТАРЫЕ перила/полы (по сохранённым спискам)
     local function destroyTileObjectList(list)
         for _, obj in ipairs(list) do
@@ -1243,6 +1375,8 @@ WindowWasher.AddPlayer = function(playerNum, playerObj)
     end
     Events.OnTick.Add(delayedTeleport)
 end
+
+
 
 WindowWasher.Render = function() end
 
