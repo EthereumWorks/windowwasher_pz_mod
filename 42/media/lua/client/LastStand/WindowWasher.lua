@@ -169,6 +169,27 @@ local function WW_spanLR(sz)
     return left, right, sz
 end
 
+-- === Control panel: two center tiles of the platform ===
+local function WW_isPlayerOnControlSquares(player)
+    if not player then return false end
+    local cx, cy, cz = WindowWasher.ps.cx, WindowWasher.ps.cy, WindowWasher.ps.cz
+    if not (cx and cy and cz) then return false end
+
+    local px = math.floor(player:getX())
+    local py = math.floor(player:getY())
+    local pz = player:getZ()
+    if pz ~= cz then return false end
+
+    if WindowWasher.ps.orient == "EW" then
+        -- центр = (cx,cy) и (cx+1,cy)
+        return (py == cy) and (px == cx or px == cx + 1)
+    else -- "NS"
+        -- центр = (cx,cy) и (cx,cy+1)
+        return (px == cx) and (py == cy or py == cy + 1)
+    end
+end
+
+
 -- ===== Floor placement (single tile) =====
 function WindowWasher.createSingleMetalFloor(x, y, z)
     local sq = getSquare(x, y, z)
@@ -357,6 +378,49 @@ local function getPlatformSquares(cx, cy, cz, size, orient)
     end
     return list
 end
+
+-- === CONTROL AREA (две центральные клетки платформы) =========================
+function WindowWasher.getControlSquares()
+    local cx, cy, cz = WindowWasher.ps.cx, WindowWasher.ps.cy, WindowWasher.ps.cz
+    local orient, size = WindowWasher.ps.orient, WindowWasher.ps.size
+    if not (cx and cy and cz and orient and size) then return {}, cz end
+
+    -- Для чётного размера (6) считаем центральной парой:
+    -- EW: (cx,cy) и (cx+1,cy)
+    -- NS: (cx,cy) и (cx,cy+1)
+    local s1, s2
+    if orient == "EW" then
+        s1 = getSquare(cx,     cy, cz)
+        s2 = getSquare(cx + 1, cy, cz)
+    else -- "NS"
+        s1 = getSquare(cx, cy,     cz)
+        s2 = getSquare(cx, cy + 1, cz)
+    end
+
+    local out = {}
+    if s1 then table.insert(out, s1) end
+    if s2 then table.insert(out, s2) end
+    return out, cz
+end
+
+function WindowWasher.isPlayerOnControlSquares(player)
+    if not player then return false end
+    local ctrls, cz = WindowWasher.getControlSquares()
+    if not cz or #ctrls == 0 then return false end
+
+    local px = math.floor(player:getX())
+    local py = math.floor(player:getY())
+    local pz = player:getZ()
+    if pz ~= cz then return false end
+
+    for _, sq in ipairs(ctrls) do
+        if sq and sq:getX() == px and sq:getY() == py then
+            return true
+        end
+    end
+    return false
+end
+
 
 -- Перенос мировых предметов (IsoWorldInventoryObject) из sqFrom -> sqTo
 -- ВАЖНО: не вызывать item:setWorldItem(nil) !
@@ -816,7 +880,6 @@ local function WW_ensureBloodOverlayClusterOnPlatform(sq, span)
 end
 
 -- любой признак движковой крови на клетке
--- любой признак движковой крови на клетке
 local function WW_hasEngineBlood(sq)
     if not sq then return false end
     local ok, v
@@ -1236,7 +1299,7 @@ function ISMovePlatformAction:new(character, dx, dy, dz)
 end
 
 function ISMovePlatformAction:isValid()
-    return true
+    return WW_isPlayerOnControlSquares(self.character)
 end
 
 function ISMovePlatformAction:start()
@@ -1245,6 +1308,13 @@ function ISMovePlatformAction:start()
 end
 
 function ISMovePlatformAction:perform()
+
+    if not WW_isPlayerOnControlSquares(self.character) then
+        print("WW TA perform ABORT: player left control panel")
+        WindowWasher.ps.moving = false
+        return
+    end
+
     local tx = WindowWasher.ps.cx + self.dx
     local ty = WindowWasher.ps.cy + self.dy
     local tz = WindowWasher.ps.cz + self.dz
@@ -1290,8 +1360,16 @@ function ISMovePlatformAction:perform()
     destroyTileObjectList(oldRails)
     destroyTileObjectList(oldFloors)
 
-    -- Телепорт игрока как раньше
-    self.character:setX(tx + 0.5); self.character:setY(ty + 0.5); self.character:setZ(tz)
+    -- Меняем только высоту персонажа, X/Y сохраняем полностью
+        local px = self.character:getX()
+        local py = self.character:getY()
+
+        self.character:setZ(tz)
+        if self.character.setLz then self.character:setLz(tz) end  -- стабилизация физики по Z
+
+        -- X/Y НЕ меняем (оставляем как были)
+        self.character:setX(px)
+        self.character:setY(py)
 
     WindowWasher.ps.moving = false
     ISBaseTimedAction.perform(self)
@@ -1300,14 +1378,25 @@ end
 -- Public API for moves (only vertical for now)
 function WindowWasher.move(dx, dy, dz, playerObj)
     if WindowWasher.ps.moving then print("WW: already moving"); return end
-        print(string.format("WW: enqueue TA dx=%s dy=%s dz=%s from %s,%s,%s",
+    local p = playerObj or getPlayer()
+    if not WW_isPlayerOnControlSquares(p) then
+        print("WW: move denied (player not on control panel)")
+        return
+    end
+    print(string.format("WW: enqueue TA dx=%s dy=%s dz=%s from %s,%s,%s",
         tostring(dx), tostring(dy), tostring(dz),
         tostring(WindowWasher.ps.cx), tostring(WindowWasher.ps.cy), tostring(WindowWasher.ps.cz)))
-    ISTimedActionQueue.add(ISMovePlatformAction:new(playerObj, dx, dy, dz))
+    ISTimedActionQueue.add(ISMovePlatformAction:new(p, dx, dy, dz))
 end
 
--- instant (debug)
+
 function WindowWasher.moveInstant(dx, dy, dz, playerObj)
+    local p = playerObj or getPlayer()
+    if not WW_isPlayerOnControlSquares(p) then
+        print("WW: instant move denied (player not on control panel)")
+        return
+    end
+
     dx = tonumber(dx) or 0; dy = tonumber(dy) or 0; dz = tonumber(dz) or 0
     local tx = WindowWasher.ps.cx + dx
     local ty = WindowWasher.ps.cy + dy
@@ -1319,7 +1408,12 @@ function WindowWasher.moveInstant(dx, dy, dz, playerObj)
     end
     WindowWasher.destroyPlatform()
     WindowWasher.buildPlatformAt(tx, ty, tz)
-    playerObj:setX(tx + 0.5); playerObj:setY(ty + 0.5); playerObj:setZ(tz)
+
+    local px, py = playerObj:getX(), playerObj:getY()
+    playerObj:setZ(tz)
+    if playerObj.setLz then playerObj:setLz(tz) end
+    playerObj:setX(px)
+    playerObj:setY(py)
 end
 
 -- wrappers for context menu (чтобы учесть target первым аргументом)
@@ -1335,6 +1429,11 @@ function WindowWasher.onFillWorldContextMenu(player, context, worldobjects, test
     if test then return end
     local p = getSpecificPlayer(player); if not p then return end
 
+    -- Меню доступно только если игрок стоит на «пульте»
+    if not WindowWasher.isPlayerOnControlSquares(p) then
+        return
+    end
+
     local root = context:addOption("Move Scaffold")
     local sub  = ISContextMenu:getNew(context); context:addSubMenu(root, sub)
 
@@ -1345,6 +1444,7 @@ function WindowWasher.onFillWorldContextMenu(player, context, worldobjects, test
     sub:addOption("[DEBUG] Up instant",   WindowWasher, WindowWasher.moveInstantMenu, 0, 0,  1, p)
     sub:addOption("[DEBUG] Down instant", WindowWasher, WindowWasher.moveInstantMenu, 0, 0, -1, p)
 end
+
 Events.OnFillWorldObjectContextMenu.Add(WindowWasher.onFillWorldContextMenu)
 
 -- ===== Hotkeys (PgUp/PgDn) =====
@@ -1356,6 +1456,88 @@ function WindowWasher.OnKeyPressed(key)
     end
 end
 Events.OnKeyPressed.Add(WindowWasher.OnKeyPressed)
+
+-- ===== Window Washer: стартовый аутфит и лут =================================
+
+-- Удобный хелпер: безопасно надеть предмет (подберёт правильный BodyLocation)
+-- СИЛОВОЕ надевание вещи в нужный BodyLocation
+local function WW_wear(playerObj, item)
+    if not (playerObj and item) then return end
+    local loc = item.getBodyLocation and item:getBodyLocation() or nil
+    if not loc or loc == "" then
+        -- на всякий: попытка авто-надевания (некоторые сумки/пояса)
+        pcall(function() if playerObj.wearItem then playerObj:wearItem(item) end end)
+        return
+    end
+    -- основной способ: прямо в нужный слот
+    pcall(function() playerObj:setWornItem(loc, item) end)
+    -- подстраховка: если не встал — попробовать авто-надевание
+    if not pcall(function() return playerObj:getWornItem(loc) == item end) then
+        pcall(function() if playerObj.wearItem then playerObj:wearItem(item) end end)
+        pcall(function() playerObj:setWornItem(loc, item) end)
+    end
+end
+
+-- Подготовка еды/напитков (свежесть/заполненность)
+local function WW_freshFood(item)
+    if item and item:IsFood() then pcall(function() item:setAge(0) end) end
+end
+local function WW_fillDrainable(item)
+    if item and item.setUsedDelta then pcall(function() item:setUsedDelta(1.0) end) end
+end
+
+-- Главная процедура загрузки
+function WindowWasher.setupWindowWasherLoadout(playerObj)
+    if not playerObj then return end
+    print("[WW] setting up inventory and clothing for Window Washer")
+
+    local inv = playerObj:getInventory()
+
+    -- Полная очистка инвентаря и одежды
+    pcall(function() inv:clear() end)
+    pcall(function() playerObj:clearWornItems() end)
+    pcall(function() playerObj:setClothingItem_Feet(nil) end)
+    pcall(function() playerObj:setClothingItem_Legs(nil) end)
+    pcall(function() playerObj:setClothingItem_Torso(nil) end)
+
+
+    local glasses   = inv:AddItem("Base.Glasses_Sun")
+    local socks     = inv:AddItem("Base.Socks_Ankle")
+    local boots     = inv:AddItem("Base.Shoes_WorkBoots")
+    local jeans     = inv:AddItem("Base.Trousers_Denim")
+    local tshirt    = inv:AddItem("Base.Tshirt_DefaultDECAL")
+    local shirt     = inv:AddItem("Base.Shirt_Lumberjack")
+    local gloves    = inv:AddItem("Base.Gloves_LeatherGloves")
+    local helmet    = inv:AddItem("Base.Hat_HardHat")
+    local fanny     = inv:AddItem("Base.Bag_FannyPackFront")
+    local belt      = inv:AddItem("Base.Belt")
+
+    -- Порядок слоёв важен:
+    WW_wear(playerObj, socks)
+    WW_wear(playerObj, boots)
+    WW_wear(playerObj, jeans)
+    WW_wear(playerObj, tshirt)   -- сначала футболка (нижний слой)
+    WW_wear(playerObj, shirt)    -- сверху рубашка
+    WW_wear(playerObj, gloves)   -- перчатки
+    WW_wear(playerObj, glasses)
+    WW_wear(playerObj, helmet)
+    WW_wear(playerObj, belt)
+    WW_wear(playerObj, fanny)
+
+    -- Явные гарантийные проверки на проблемные слоты
+    pcall(function()
+        if not playerObj:getWornItem("Socks") and socks then
+            playerObj:setWornItem("Socks", socks)
+        end
+        if not playerObj:getWornItem("Hands") and gloves then
+            playerObj:setWornItem("Hands", gloves)
+        end
+        -- Футболка иногда конфликтует с верхом: пробуем ещё раз
+        if not playerObj:getWornItem("Tshirt") and tshirt then
+            playerObj:setWornItem(tshirt:getBodyLocation(), tshirt)
+        end
+    end)
+end
 
 -- ===== Player spawn =====
 WindowWasher.AddPlayer = function(playerNum, playerObj)
@@ -1370,10 +1552,16 @@ WindowWasher.AddPlayer = function(playerNum, playerObj)
         WindowWasher.buildPlatformAt(cx, cy, cz)
         playerObj:setX(cx + 0.5); playerObj:setY(cy + 0.5); playerObj:setZ(cz)
 
+        WindowWasher.setupWindowWasherLoadout(playerObj)
+
         print(("WindowWasher: platform ready at %d,%d,%d"):format(cx,cy,cz))
         Events.OnTick.Remove(delayedTeleport)
     end
+
+
+
     Events.OnTick.Add(delayedTeleport)
+
 end
 
 
