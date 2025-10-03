@@ -96,7 +96,7 @@ local initialized = false
 -- ===== Platform state & params =====
 WindowWasher.ps = {
     cx = nil, cy = nil, cz = nil,          -- current center
-    size = 6,                              -- odd: 3/5/7
+    size = 3,                              -- odd: 3/5/7
     orient = "EW",                         -- "EW" or "NS"
     sprite = "constructedobjects_01_86",   -- metal floor sprite
     objs = {},                             -- created floor objects (to remove)
@@ -1486,7 +1486,7 @@ local function WW_fillDrainable(item)
     if item and item.setUsedDelta then pcall(function() item:setUsedDelta(1.0) end) end
 end
 
--- Главная процедура загрузки
+-- Главная процедура наполнения инвентаря и одежды
 function WindowWasher.setupWindowWasherLoadout(playerObj)
     if not playerObj then return end
     print("[WW] setting up inventory and clothing for Window Washer")
@@ -1499,7 +1499,6 @@ function WindowWasher.setupWindowWasherLoadout(playerObj)
     pcall(function() playerObj:setClothingItem_Feet(nil) end)
     pcall(function() playerObj:setClothingItem_Legs(nil) end)
     pcall(function() playerObj:setClothingItem_Torso(nil) end)
-
 
     local glasses   = inv:AddItem("Base.Glasses_Sun")
     local socks     = inv:AddItem("Base.Socks_Ankle")
@@ -1524,6 +1523,12 @@ function WindowWasher.setupWindowWasherLoadout(playerObj)
     WW_wear(playerObj, belt)
     WW_wear(playerObj, fanny)
 
+    -- ⌚ Часы на левую руку
+    local watch = inv:AddItem("Base.WristWatch_Left_DigitalBlack")
+    if watch then
+        WW_wear(playerObj, watch) -- поставит по BodyLocation (ожидаемо "LeftWrist")
+    end
+
     -- Явные гарантийные проверки на проблемные слоты
     pcall(function()
         if not playerObj:getWornItem("Socks") and socks then
@@ -1532,12 +1537,46 @@ function WindowWasher.setupWindowWasherLoadout(playerObj)
         if not playerObj:getWornItem("Hands") and gloves then
             playerObj:setWornItem("Hands", gloves)
         end
-        -- Футболка иногда конфликтует с верхом: пробуем ещё раз
         if not playerObj:getWornItem("Tshirt") and tshirt then
             playerObj:setWornItem(tshirt:getBodyLocation(), tshirt)
         end
     end)
+
+    -- ==== ДОП. СТАРТОВЫЙ ИНВЕНТАРЬ ===========================================
+    local function WW_safeAdd(inv, fullType)
+        if not inv or not fullType then return nil end
+        local ok, item = pcall(function() return inv:AddItem(tostring(fullType)) end)
+        return (ok and item) or nil
+    end
+
+    -- Ланчбокс с едой (без воды)
+    local lunch = WW_safeAdd(inv, "Base.Lunchbox")
+    if lunch and lunch.IsInventoryContainer and lunch:IsInventoryContainer() then
+        local boxInv = lunch:getInventory()
+        local it1 = WW_safeAdd(boxInv, "Base.Sandwich");  WW_freshFood(it1)
+        local it2 = WW_safeAdd(boxInv, "Base.Apple");           WW_freshFood(it2)
+        local it3 = WW_safeAdd(boxInv, "Base.Pop2");            WW_fillDrainable(it3)
+    else
+        local it1 = WW_safeAdd(inv, "Base.Sandwich");  WW_freshFood(it1)
+        local it2 = WW_safeAdd(inv, "Base.Apple");           WW_freshFood(it2)
+        local it3 = WW_safeAdd(inv, "Base.Pop2");            WW_fillDrainable(it3)
+    end
+
+    -- Вода в инвентарь (не в ланчбокс)
+    local water = WW_safeAdd(inv, "Base.WaterBottle")
+    WW_fillDrainable(water)
+
+    -- Сигареты и зажигалка
+    WW_safeAdd(inv, "Base.CigarettePack")
+    local lighter = WW_safeAdd(inv, "Base.LighterDisposable")
+    WW_fillDrainable(lighter)
+
+    -- Две верёвки
+    for i = 1, 2 do
+        WW_safeAdd(inv, "Base.Rope")
+    end
 end
+
 
 -- ===== Player spawn =====
 WindowWasher.AddPlayer = function(playerNum, playerObj)
@@ -1545,7 +1584,7 @@ WindowWasher.AddPlayer = function(playerNum, playerObj)
     local function delayedTeleport()
         local cx, cy, cz = WindowWasher.x, WindowWasher.y, WindowWasher.z
 
-        WindowWasher.ps.size   = 6
+        WindowWasher.ps.size   = 3
         WindowWasher.ps.orient = "EW"
         WindowWasher.ps.sprite = "constructedobjects_01_86"
 
@@ -1558,10 +1597,7 @@ WindowWasher.AddPlayer = function(playerNum, playerObj)
         Events.OnTick.Remove(delayedTeleport)
     end
 
-
-
     Events.OnTick.Add(delayedTeleport)
-
 end
 
 
@@ -1576,7 +1612,7 @@ WindowWasher.gameMode = "Window Washer";
 WindowWasher.world = "Muldraugh, KY";
 
 -- spawn coordinates in Louisville
-WindowWasher.x = 12782;
+WindowWasher.x = 12785;
 WindowWasher.y = 1539;
 WindowWasher.z = 24;
 WindowWasher.hourOfDay = 7;
