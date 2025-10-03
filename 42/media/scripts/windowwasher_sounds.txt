@@ -1,0 +1,29 @@
+sound WW_Winch_Electric_Loop
+{
+    category = Object,
+    is3D    = true,
+    loop    = true,
+    maxInstancesPerEmitter = 1,
+
+    clip {
+        file        = media/sound/ww_winch_electric_loop.ogg,
+        distanceMin = 1,      # «громко» в упор
+        distanceMax = 20,     # примерно ваш прежний radius
+        volume      = 0.9,
+    }
+}
+
+sound WW_Winch_Manual_Loop
+{
+    category = Object,
+    is3D    = true,
+    loop    = true,
+    maxInstancesPerEmitter = 1,
+
+    clip {
+        file        = media/sound/ww_winch_manual_loop_.ogg,
+        distanceMin = 1,
+        distanceMax = 10,
+        volume      = 0.9,
+    }
+}

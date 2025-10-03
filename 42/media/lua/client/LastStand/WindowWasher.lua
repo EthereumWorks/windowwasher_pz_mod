@@ -9,6 +9,47 @@ WindowWasher.Add = function()
     addChallenge(WindowWasher);
 end
 
+-- ==== AUDIO (минимум) =======================================================
+WindowWasher.audio = WindowWasher.audio or { emitter=nil, current=nil }
+
+local function WW_audioCenter()
+    local cx, cy, cz = WindowWasher.ps.cx or 0, WindowWasher.ps.cy or 0, WindowWasher.ps.cz or 0
+    return cx + 0.5, cy + 0.5, cz
+end
+
+function WindowWasher.audio_start(loopName)
+    -- Если уже играет другой луп — остановим его
+    if WindowWasher.audio.emitter then
+        WindowWasher.audio.emitter:stopAll()
+        WindowWasher.audio.emitter = nil
+        WindowWasher.audio.current = nil
+    end
+    local em = getWorld():getFreeEmitter()
+    local x,y,z = WW_audioCenter()
+    em:setPos(x, y, z)
+    em:playSound(loopName)  -- имя из media/scripts/windowwasher_sounds.txt
+    WindowWasher.audio.emitter = em
+    WindowWasher.audio.current = loopName
+end
+
+function WindowWasher.audio_updatePos()
+    local a = WindowWasher.audio
+    if not a.emitter then return end
+    local x,y,z = WW_audioCenter()
+    a.emitter:setPos(x, y, z)
+end
+
+function WindowWasher.audio_stop()
+    local a = WindowWasher.audio
+    if a.emitter then
+        a.emitter:stopAll()
+    end
+    a.emitter = nil
+    a.current = nil
+end
+-- ============================================================================
+
+
 WindowWasher.debug           = WindowWasher.debug or {}
 
 -- ==== DEBUG: blood splats logging ===============
@@ -1284,14 +1325,21 @@ local function movePlatformContents(oldCx, oldCy, oldCz, newCx, newCy, newCz, si
     end
 end
 
-
+-- Длительности
+WindowWasher.ps.moveDurationElectric = 0.5   -- секунды на этаж
+WindowWasher.ps.moveDurationManual   = 1.5   -- дольше, игрок крутит руками
 -- ===== Timed Action for movement (vertical) =====
 ISMovePlatformAction = ISBaseTimedAction:derive("ISMovePlatformAction")
 
-function ISMovePlatformAction:new(character, dx, dy, dz)
+function ISMovePlatformAction:new(character, dx, dy, dz, winchType)
     local o = ISBaseTimedAction.new(self, character)
     o.dx, o.dy, o.dz = dx, dy, dz
-    o.maxTime = WindowWasher.ps.moveDuration * 60  -- seconds -> ticks
+    o.winchType = winchType or "electric"
+    if o.winchType == "manual" then
+        o.maxTime = WindowWasher.ps.moveDurationManual * 60
+    else
+        o.maxTime = WindowWasher.ps.moveDurationElectric * 60
+    end
     o.stopOnWalk = true
     o.stopOnRun  = true
     o.stopOnAim  = true
@@ -1303,8 +1351,24 @@ function ISMovePlatformAction:isValid()
 end
 
 function ISMovePlatformAction:start()
-    print("WW TA start")
+    print("WW TA start ("..self.winchType..")")
     WindowWasher.ps.moving = true
+
+    if self.winchType == "manual" then
+        WindowWasher.audio_start("WW_Winch_Manual_Loop")
+        -- отнимем немного выносливости каждый запуск
+        self.character:getStats():setEndurance(self.character:getStats():getEndurance() - 0.05)
+    else
+        WindowWasher.audio_start("WW_Winch_Electric_Loop")
+    end
+
+    WindowWasher.audio_updatePos()
+end
+
+function ISMovePlatformAction:stop()
+    WindowWasher.audio_stop()
+    WindowWasher.ps.moving = false
+    ISBaseTimedAction.stop(self)
 end
 
 function ISMovePlatformAction:perform()
@@ -1371,22 +1435,21 @@ function ISMovePlatformAction:perform()
         self.character:setX(px)
         self.character:setY(py)
 
+    -- ВАЖНО: перед завершением действия выключим звук
+    WindowWasher.audio_stop()
     WindowWasher.ps.moving = false
     ISBaseTimedAction.perform(self)
 end
 
 -- Public API for moves (only vertical for now)
-function WindowWasher.move(dx, dy, dz, playerObj)
+function WindowWasher.move(dx, dy, dz, playerObj, winchType)
     if WindowWasher.ps.moving then print("WW: already moving"); return end
     local p = playerObj or getPlayer()
     if not WW_isPlayerOnControlSquares(p) then
         print("WW: move denied (player not on control panel)")
         return
     end
-    print(string.format("WW: enqueue TA dx=%s dy=%s dz=%s from %s,%s,%s",
-        tostring(dx), tostring(dy), tostring(dz),
-        tostring(WindowWasher.ps.cx), tostring(WindowWasher.ps.cy), tostring(WindowWasher.ps.cz)))
-    ISTimedActionQueue.add(ISMovePlatformAction:new(p, dx, dy, dz))
+    ISTimedActionQueue.add(ISMovePlatformAction:new(p, dx, dy, dz, winchType))
 end
 
 
@@ -1417,32 +1480,31 @@ function WindowWasher.moveInstant(dx, dy, dz, playerObj)
 end
 
 -- wrappers for context menu (чтобы учесть target первым аргументом)
-function WindowWasher.moveMenu(_, dx, dy, dz, playerObj)
-    WindowWasher.move(dx, dy, dz, playerObj)
+function WindowWasher.moveMenu(_, dx, dy, dz, playerObj, winchType)
+    WindowWasher.move(dx, dy, dz, playerObj, winchType)
 end
 function WindowWasher.moveInstantMenu(_, dx, dy, dz, playerObj)
     WindowWasher.moveInstant(dx, dy, dz, playerObj)
 end
 
+
+
 -- ===== Context menu (vertical only) =====
 function WindowWasher.onFillWorldContextMenu(player, context, worldobjects, test)
     if test then return end
     local p = getSpecificPlayer(player); if not p then return end
-
-    -- Меню доступно только если игрок стоит на «пульте»
-    if not WindowWasher.isPlayerOnControlSquares(p) then
-        return
-    end
+    if not WindowWasher.isPlayerOnControlSquares(p) then return end
 
     local root = context:addOption("Move Scaffold")
     local sub  = ISContextMenu:getNew(context); context:addSubMenu(root, sub)
 
-    sub:addOption("Up (+1 floor)",   WindowWasher, WindowWasher.moveMenu,        0, 0,  1, p)
-    sub:addOption("Down (-1 floor)", WindowWasher, WindowWasher.moveMenu,        0, 0, -1, p)
+    -- Электро
+    sub:addOption("Up (Electric)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "electric")
+    sub:addOption("Down (Electric)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "electric")
 
-    -- DEBUG:
-    sub:addOption("[DEBUG] Up instant",   WindowWasher, WindowWasher.moveInstantMenu, 0, 0,  1, p)
-    sub:addOption("[DEBUG] Down instant", WindowWasher, WindowWasher.moveInstantMenu, 0, 0, -1, p)
+    -- Ручная
+    sub:addOption("Up (Manual)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "manual")
+    sub:addOption("Down (Manual)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "manual")
 end
 
 Events.OnFillWorldObjectContextMenu.Add(WindowWasher.onFillWorldContextMenu)
