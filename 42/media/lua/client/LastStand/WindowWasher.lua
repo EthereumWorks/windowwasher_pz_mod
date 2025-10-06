@@ -9,6 +9,25 @@ WindowWasher.Add = function()
     addChallenge(WindowWasher);
 end
 
+
+-- ====== Endurance drain for manual winch (per floor) ======
+WindowWasher.stamina = WindowWasher.stamina or {}
+
+-- Базовая цена за 1 этаж вручную (в долях шкалы 0..1).
+-- 0.03 = 3% за этаж.
+WindowWasher.stamina.manualPerFloor = 0.03
+
+-- Базовая цена за 1 этаж вручную (ощутимая)
+WindowWasher.stamina.manualPerFloor = 0.25
+WindowWasher.stamina.manualUpMult   = 1.00
+WindowWasher.stamina.manualDownMult = 0.70
+
+-- Доп. «цена» за перегруз (на каждый кг сверх лимита) за 1 этаж.
+WindowWasher.stamina.manualOverweightPerKg = 0.0035
+
+-- При критически низкой выносливости — авто-отмена
+WindowWasher.stamina.autoCancelThreshold = 0.12
+
 -- ==== AUDIO (минимум) =======================================================
 WindowWasher.audio = WindowWasher.audio or { emitter=nil, current=nil }
 
@@ -51,6 +70,27 @@ end
 
 
 WindowWasher.debug           = WindowWasher.debug or {}
+
+-- ==== DEBUG: stamina console probe ==========================================
+WindowWasher.debug.staminaProbe = true
+
+do
+    local _acc = 0
+    local function WW_dbgStaminaTick()
+        if not WindowWasher.debug.staminaProbe then return end
+        _acc = _acc + 1
+        if _acc >= 30 then -- 5 сек при 60 тиков/сек
+            local p = getPlayer()
+            if p then
+                local e = p:getStats():getEndurance() or 0
+                print(string.format("[WW/STA] Endurance: %.3f  (%.0f%%)", e, e*100))
+            end
+            _acc = 0
+        end
+    end
+    Events.OnTick.Add(WW_dbgStaminaTick)
+end
+
 
 -- ==== DEBUG: blood splats logging ===============
 WindowWasher.debug.blood = true
@@ -96,6 +136,13 @@ local function bodyStr(body)
     return tag
 end
 -- ================================================================================
+
+local function WW_overweightKg(ch)
+    local inv = ch:getInventory()
+    local cur = inv and inv:getCapacityWeight() or 0
+    local max = inv and inv:getMaxWeight() or 0
+    return math.max(0, cur - max)
+end
 
 
 -- ====== ПЕРИЛА (НАСТРОЙКА СПРАЙТОВ) ==========================================
@@ -1331,38 +1378,112 @@ WindowWasher.ps.moveDurationManual   = 1.5   -- дольше, игрок кру�
 -- ===== Timed Action for movement (vertical) =====
 ISMovePlatformAction = ISBaseTimedAction:derive("ISMovePlatformAction")
 
+-- ===== Stamina & duration helpers (manual winch) ============================
+local function WW_statMults(character)
+    local s = math.max(1, math.min(10, character:getPerkLevel(Perks.Strength) or 5))
+    local f = math.max(1, math.min(10, character:getPerkLevel(Perks.Fitness)  or 5))
+
+    -- Endurance cost multipliers
+    local ms = 1 - 0.05 * (s - 5); ms = math.max(0.70, math.min(1.30, ms))
+    local mf = 1 - 0.04 * (f - 5); mf = math.max(0.80, math.min(1.20, mf))
+
+    -- Duration multiplier (faster with strength/fitness)
+    local md = 1 - 0.02 * (s - 5) - 0.01 * (f - 5)
+    md = math.max(0.80, math.min(1.20, md))
+
+    return ms, mf, md
+end
+
+local function WW_manualCostAndDuration(character, isDown)
+    local baseCost = WindowWasher.stamina.manualPerFloor or 0.09
+    local dirMult  = isDown and (WindowWasher.stamina.manualDownMult or 0.70)
+                             or (WindowWasher.stamina.manualUpMult   or 1.00)
+
+    local baseDur  = WindowWasher.ps.moveDurationManual or 1.5
+    local dirDur   = isDown and 0.85 or 1.00  -- вниз чуть быстрее
+
+    local ms, mf, md = WW_statMults(character)
+
+    -- === НОВОЕ: перегрузка
+    local owkg = WW_overweightKg(character) or 0
+    local owCost = owkg * (WindowWasher.stamina.manualOverweightPerKg or 0)
+
+    local staminaCost = baseCost * dirMult * ms * mf + owCost
+    local duration    = baseDur * dirDur * md * (1 + math.min(0.50, owkg * 0.01)) -- +1% длительности на 1 кг, макс +50%
+
+    -- штрафы на низкой выносливости (оставляем твою логику)
+    local e = character:getStats():getEndurance()
+    if e < 0.15 then
+        staminaCost = staminaCost * 2.0
+        duration    = duration    * 1.50
+    elseif e < 0.30 then
+        staminaCost = staminaCost * 1.50
+        duration    = duration    * 1.25
+    end
+
+    return staminaCost, duration
+end
+
 function ISMovePlatformAction:new(character, dx, dy, dz, winchType)
     local o = ISBaseTimedAction.new(self, character)
-    o.dx, o.dy, o.dz = dx, dy, dz
-    o.winchType = winchType or "electric"
+    o.dx, o.dy, o.dz   = dx, dy, dz
+    o.winchType        = winchType or "electric"
+
     if o.winchType == "manual" then
-        o.maxTime = WindowWasher.ps.moveDurationManual * 60
+        local isDown = (dz or 0) < 0
+        local perFloorCost, durSec = WW_manualCostAndDuration(character, isDown)
+        o._totalDrain     = math.max(0, perFloorCost)
+        o._drainPerSecond = (durSec > 0) and (o._totalDrain / durSec) or 0
+        o.maxTime = (durSec > 0 and durSec or 1.5) * 60
+
+        print(string.format("[WW] Manual calc: cost=%.3f, dur=%.2fs, ow=%.1fkg, S=%d F=%d",
+            perFloorCost, durSec, WW_overweightKg(character) or 0,
+            character:getPerkLevel(Perks.Strength) or 0,
+            character:getPerkLevel(Perks.Fitness)  or 0))
     else
-        o.maxTime = WindowWasher.ps.moveDurationElectric * 60
+        o.maxTime         = WindowWasher.ps.moveDurationElectric * 60
+        o._drainPerSecond = 0
     end
-    o.stopOnWalk = true
-    o.stopOnRun  = true
-    o.stopOnAim  = true
+    o.stopOnWalk, o.stopOnRun, o.stopOnAim = true, true, true
     return o
 end
+
 
 function ISMovePlatformAction:isValid()
     return WW_isPlayerOnControlSquares(self.character)
 end
 
 function ISMovePlatformAction:start()
-    print("WW TA start ("..self.winchType..")")
     WindowWasher.ps.moving = true
-
     if self.winchType == "manual" then
         WindowWasher.audio_start("WW_Winch_Manual_Loop")
-        -- отнимем немного выносливости каждый запуск
-        self.character:getStats():setEndurance(self.character:getStats():getEndurance() - 0.05)
     else
         WindowWasher.audio_start("WW_Winch_Electric_Loop")
     end
-
     WindowWasher.audio_updatePos()
+    self._tickAcc = 0
+end
+
+function ISMovePlatformAction:update()
+    ISBaseTimedAction.update(self)
+    WindowWasher.audio_updatePos()
+
+    -- Равномерный дренаж только для ручной
+    if self.winchType == "manual" and self._drainPerSecond and self._drainPerSecond > 0 then
+        self._tickAcc = (self._tickAcc or 0) + 1
+        if self._tickAcc >= 6 then        -- ~0.1 сек при 60 тиков/сек (мелкими порциями)
+            local dt   = self._tickAcc / 60.0
+            local stats= self.character:getStats()
+            local e    = stats:getEndurance()
+            e = math.max(0, e - self._drainPerSecond * dt)
+            stats:setEndurance(e)
+            self._tickAcc = 0
+
+            if e <= (WindowWasher.stamina.autoCancelThreshold or 0) then
+                self:stop()
+            end
+        end
+    end
 end
 
 function ISMovePlatformAction:stop()
