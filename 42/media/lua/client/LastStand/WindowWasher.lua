@@ -20,7 +20,7 @@ WindowWasher.stamina.manualPerFloor = 0.03
 -- Базовая цена за 1 этаж вручную (ощутимая)
 WindowWasher.stamina.manualPerFloor = 0.25
 WindowWasher.stamina.manualUpMult   = 1.00
-WindowWasher.stamina.manualDownMult = 0.70
+WindowWasher.stamina.manualDownMult = 0.50
 
 -- Доп. «цена» за перегруз (на каждый кг сверх лимита) за 1 этаж.
 WindowWasher.stamina.manualOverweightPerKg = 0.0035
@@ -72,7 +72,7 @@ end
 WindowWasher.debug           = WindowWasher.debug or {}
 
 -- ==== DEBUG: stamina console probe ==========================================
-WindowWasher.debug.staminaProbe = true
+WindowWasher.debug.staminaProbe = false
 
 do
     local _acc = 0
@@ -1384,8 +1384,8 @@ local function WW_statMults(character)
     local f = math.max(1, math.min(10, character:getPerkLevel(Perks.Fitness)  or 5))
 
     -- Endurance cost multipliers
-    local ms = 1 - 0.05 * (s - 5); ms = math.max(0.70, math.min(1.30, ms))
-    local mf = 1 - 0.04 * (f - 5); mf = math.max(0.80, math.min(1.20, mf))
+    local ms = 1 - 0.1 * (s - 5); ms = math.max(0.50, math.min(1.50, ms))
+    local mf = 1 - 0.08 * (f - 5); mf = math.max(0.60, math.min(1.4, mf))
 
     -- Duration multiplier (faster with strength/fitness)
     local md = 1 - 0.02 * (s - 5) - 0.01 * (f - 5)
@@ -1450,38 +1450,51 @@ end
 
 
 function ISMovePlatformAction:isValid()
-    return WW_isPlayerOnControlSquares(self.character)
+    if not WW_isPlayerOnControlSquares(self.character) then return false end
+    if self.winchType == "manual" then
+        local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
+        if (self.character:getStats():getEndurance() or 0) <= thr then
+            return false
+        end
+    end
+    return true
 end
 
 function ISMovePlatformAction:start()
     WindowWasher.ps.moving = true
     if self.winchType == "manual" then
         WindowWasher.audio_start("WW_Winch_Manual_Loop")
+        self._lastJobDelta = 0
+        self._drained = 0
+        -- по желанию: WW_beginManualMetabolic(self)
     else
         WindowWasher.audio_start("WW_Winch_Electric_Loop")
     end
     WindowWasher.audio_updatePos()
-    self._tickAcc = 0
 end
 
 function ISMovePlatformAction:update()
     ISBaseTimedAction.update(self)
     WindowWasher.audio_updatePos()
 
-    -- Равномерный дренаж только для ручной
-    if self.winchType == "manual" and self._drainPerSecond and self._drainPerSecond > 0 then
-        self._tickAcc = (self._tickAcc or 0) + 1
-        if self._tickAcc >= 6 then        -- ~0.1 сек при 60 тиков/сек (мелкими порциями)
-            local dt   = self._tickAcc / 60.0
-            local stats= self.character:getStats()
-            local e    = stats:getEndurance()
-            e = math.max(0, e - self._drainPerSecond * dt)
-            stats:setEndurance(e)
-            self._tickAcc = 0
+    if self.winchType == "manual" then
+        local d = self.getJobDelta and (self:getJobDelta() or 0) or 0
+        local inc = math.max(0, d - (self._lastJobDelta or 0))
+        self._lastJobDelta = d
 
-            if e <= (WindowWasher.stamina.autoCancelThreshold or 0) then
-                self:stop()
-            end
+        local de = (self._totalDrain or 0) * inc
+        if de > 0 then
+            local s = self.character:getStats()
+            s:setEndurance(math.max(0, s:getEndurance() - de))
+            self._drained = (self._drained or 0) + de
+        end
+
+        local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
+        if (self.character:getStats():getEndurance() or 0) <= thr then
+            self._exhaustedCancel = true
+            -- Критично: именно forceStop(), иначе perform() всё равно вызовут
+            self:forceStop()
+            return
         end
     end
 end
@@ -1489,10 +1502,19 @@ end
 function ISMovePlatformAction:stop()
     WindowWasher.audio_stop()
     WindowWasher.ps.moving = false
+    -- по желанию: WW_endManualMetabolic(self)
     ISBaseTimedAction.stop(self)
 end
 
 function ISMovePlatformAction:perform()
+
+    -- safety-гейт: если автокэнсел уже случился — не двигаем ничего
+    if self._exhaustedCancel then
+        WindowWasher.audio_stop()
+        WindowWasher.ps.moving = false
+        -- завершаем действие как отменённое без сайд-эффектов
+        return
+    end
 
     if not WW_isPlayerOnControlSquares(self.character) then
         print("WW TA perform ABORT: player left control panel")
@@ -1556,11 +1578,21 @@ function ISMovePlatformAction:perform()
         self.character:setX(px)
         self.character:setY(py)
 
-    -- ВАЖНО: перед завершением действия выключим звук
+    if self.winchType == "manual" then
+        -- по желанию: WW_endManualMetabolic(self)
+        -- добор крошечного остатка (на случай редких апдейтов)
+        local drained   = self._drained or 0
+        local remainder = math.max(0, (self._totalDrain or 0) - drained)
+        if remainder > 0 then
+            local s = self.character:getStats()
+            s:setEndurance(math.max(0, s:getEndurance() - remainder))
+        end
+    end
     WindowWasher.audio_stop()
     WindowWasher.ps.moving = false
     ISBaseTimedAction.perform(self)
 end
+
 
 -- Public API for moves (only vertical for now)
 function WindowWasher.move(dx, dy, dz, playerObj, winchType)
@@ -1570,6 +1602,17 @@ function WindowWasher.move(dx, dy, dz, playerObj, winchType)
         print("WW: move denied (player not on control panel)")
         return
     end
+
+    -- ⬇️ мгновенный отказ, если сил не хватает для ручной лебёдки
+    if winchType == "manual" then
+        local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
+        if (p:getStats():getEndurance() or 0) <= thr then
+            -- тут без UI, просто тихо откажем
+            print(string.format("WW: manual move denied (endurance<=%.2f)", thr))
+            return
+        end
+    end
+
     ISTimedActionQueue.add(ISMovePlatformAction:new(p, dx, dy, dz, winchType))
 end
 
