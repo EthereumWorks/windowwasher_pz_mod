@@ -1,0 +1,31 @@
+version=1
+
+tileset
+{
+  file = 4245
+  name       = "ww_ropes"
+  tilewidth  = 128
+  tileheight = 256
+}
+
+tiledef
+{
+  name    = "rope_N_left"
+  tileset = "ww_ropes"
+  tile    = 0
+  properties
+  {
+    WallOverlayN = true
+  }
+}
+
+tiledef
+{
+  name    = "rope_N_right"
+  tileset = "ww_ropes"
+  tile    = 1
+  properties
+  {
+    WallOverlayN = true
+  }
+}

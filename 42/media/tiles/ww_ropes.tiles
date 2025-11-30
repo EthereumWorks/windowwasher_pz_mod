@@ -1,0 +1,13 @@
+version=1
+
+tiledef
+{
+  tile "rope_N_left"
+  flags = WallOverlayN
+}
+
+tiledef
+{
+  tile "rope_N_right"
+  flags = WallOverlayN
+}

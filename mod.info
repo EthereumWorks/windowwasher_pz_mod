@@ -6,3 +6,5 @@ lua = shared/WindowWasherProfession.lua
 lua = client
 icon=true
 version=1.0
+tiledef=media/tiles/ww_ropes.tiles
+

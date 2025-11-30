@@ -9,6 +9,69 @@ WindowWasher.Add = function()
     addChallenge(WindowWasher);
 end
 
+-- ===== DEBUG HELPERS =========================================================
+local function WW_flagsToStr(props)
+    if not props then return "(no-props)" end
+    local F = IsoFlagType
+    local names = {
+        "WallN","WallW","WallOverlayN","WallOverlayW","WallTopN","WallTopW",
+        "HoppableN","HoppableW","WindowN","WindowW","DoorN","DoorW",
+        "WallTransN","WallTransW"
+    }
+    local t = {}
+    for _,n in ipairs(names) do
+        local ok, is = pcall(function() return props:Is(F[n]) end)
+        if ok and is then table.insert(t, n) end
+    end
+    return #t>0 and table.concat(t,",") or "(none)"
+end
+
+local function WW_dumpSquare(x,y,z, tag)
+    local sq = getSquare(x,y,z)
+    if not sq then
+        print(("[WW/DBG] %s @(%d,%d,%d): sq=nil"):format(tag or "Square", x,y,z))
+        return
+    end
+    print(("[WW/DBG] %s @(%d,%d,%d): objs=%d spc=%d wobj=%d")
+        :format(tag or "Square", x,y,z,
+                (sq:getObjects() and sq:getObjects():size() or 0),
+                (sq:getSpecialObjects() and sq:getSpecialObjects():size() or 0),
+                (sq:getWorldObjects() and sq:getWorldObjects():size() or 0)))
+    local objs = sq:getObjects()
+    if objs then
+        for i=0,objs:size()-1 do
+            local o = objs:get(i)
+            local spr = o and o:getSprite()
+            local nm = spr and spr:getName() or (o and o.getSpriteName and o:getSpriteName()) or "?"
+            local fl = spr and WW_flagsToStr(spr:getProperties()) or "(no-sprite)"
+            print(("[WW/DBG]   #%d %s  flags=[%s]  class=%s"):format(i, tostring(nm), fl, tostring(o)))
+        end
+    end
+end
+
+local function WW_checkSprite(name)
+    local s = getSprite(name)
+    if not s then
+        print(("[WW/DBG] sprite '%s' = nil"):format(tostring(name)))
+        return false
+    end
+    local ok,isOverlay = pcall(function() return s:getProperties():Is(IsoFlagType.WallOverlayN) end)
+    print(("[WW/DBG] sprite '%s' -> %s  WallOverlayN=%s  flags=[%s]")
+          :format(tostring(name), tostring(s),
+                  tostring(ok and isOverlay or false),
+                  WW_flagsToStr(s:getProperties())))
+    return ok and isOverlay
+end
+
+
+-- ====== ТРОСЫ (только северные оверлеи) =====================================
+WindowWasher.ropes = {
+    enabled = true,
+    N_left  = "rope_N_left",
+    N_right = "rope_N_right",
+}
+
+WindowWasher.ropeObjs = {}
 
 -- ====== Endurance drain for manual winch (per floor) ======
 WindowWasher.stamina = WindowWasher.stamina or {}
@@ -196,7 +259,7 @@ WindowWasher.ps = {
 -- ===== Sandbox config =====
 WindowWasher.OnInitWorld = function()
 
-    SandboxVars.Zombies = 3;
+    SandboxVars.Zombies = 1;
     SandboxVars.Distribution = 1;
     SandboxVars.DayLength = 3;
     SandboxVars.StartMonth = 7;
@@ -247,6 +310,13 @@ function WindowWasher.OnGameStart()
             print("WindowWasher: patched LastStandData.onPlayerDeath")
         end
     end
+
+    local function logSpriteFlags(name)
+        WW_checkSprite(name) -- печатает сразу всё нужное
+    end
+    
+    logSpriteFlags("rope_N_left")
+    logSpriteFlags("rope_N_right")
 end
 
 -- вместо "half" будем везде считать left/right
@@ -374,6 +444,85 @@ function WindowWasher.buildRailsAlongLine(cx, cy, cz)
     end
 end
 
+local function addRopeSpriteAt(x, y, z, spriteName, label)
+    print(("[WW/ROPES] try add '%s' at (%d,%d,%d)"):format(tostring(spriteName),x,y,z))
+    if not spriteName or spriteName == "" then print("[WW/ROPES]   abort: empty spriteName"); return nil end
+
+    local haveOverlay = WW_checkSprite(spriteName)
+
+    local sq = getSquare(x, y, z); if not sq then print("[WW/ROPES]   abort: no square"); return nil end
+    local cell = getWorld():getCell()
+    local obj = IsoObject.new(cell, sq, tostring(spriteName))
+    if not obj then print("[WW/ROPES]   abort: IsoObject.new == nil"); return nil end
+
+    if label then obj:setName(label) end
+    sq:AddTileObject(obj)
+    sq:RecalcAllWithNeighbours(true)
+
+    print(("[WW/ROPES]   ADDED ok (overlay=%s). After add:"):format(tostring(haveOverlay)))
+    WW_dumpSquare(x,y,z,"RopeSquare")
+
+    table.insert(WindowWasher.ropeObjs, obj)
+    return obj
+end
+
+
+local function addRopeN(x, y, z, spriteName)
+    -- спрайт должен иметь флаг WallOverlayN
+    return addRopeSpriteAt(x, y, z, spriteName, "WW Rope N")
+end
+
+function WindowWasher.destroyRopes()
+    for _, obj in ipairs(WindowWasher.ropeObjs) do
+        local sq = obj and obj:getSquare()
+        if sq and obj then
+            sq:RemoveTileObject(obj)
+            sq:RecalcAllWithNeighbours(true)
+        end
+    end
+    WindowWasher.ropeObjs = {}
+end
+
+function WindowWasher.buildRopes(cx, cy, cz)
+    if not (WindowWasher.ropes and WindowWasher.ropes.enabled) then
+        print("[WW/ROPES] disabled"); return
+    end
+    local left, right = (function(sz)
+        sz = math.max(1, tonumber(sz) or 3)
+        local l = math.floor((sz - 1) / 2)
+        local r = sz - l - 1
+        return l, r
+    end)(WindowWasher.ps.size)
+
+    print(("[WW/ROPES] buildRopes: center=(%d,%d,%d) size=%d orient=%s")
+        :format(cx,cy,cz, WindowWasher.ps.size, WindowWasher.ps.orient))
+
+    if WindowWasher.ps.orient == "EW" then
+        local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.EW) or "S"
+        local xL = cx - left
+        local xR = cx + right
+        print(("[WW/ROPES]   EW side=%s xL=%d xR=%d"):format(side, xL, xR))
+
+        if side == "N" then
+            print("[WW/ROPES]   place at y=cy (north edge of same squares)")
+            addRopeN(xL, cy, cz, WindowWasher.ropes.N_left)
+            addRopeN(xR, cy, cz, WindowWasher.ropes.N_right)
+        else
+            print("[WW/ROPES]   place at y=cy+1 (north edge of squares below)")
+            addRopeN(xL, cy + 1, cz, WindowWasher.ropes.N_left)
+            addRopeN(xR, cy + 1, cz, WindowWasher.ropes.N_right)
+        end
+
+        -- Контрольный дамп обеих клеток
+        WW_dumpSquare(xL, (side=="N") and cy or (cy+1), cz, "AfterRope-LEFT")
+        WW_dumpSquare(xR, (side=="N") and cy or (cy+1), cz, "AfterRope-RIGHT")
+
+    else
+        print("[WW/ROPES]   NS orientation — пропуск (нужны WallOverlayW)")
+    end
+end
+
+
 
 -- ===== Platform build / remove =====
 function WindowWasher.destroyPlatform()
@@ -388,6 +537,8 @@ function WindowWasher.destroyPlatform()
     WindowWasher.ps.objs = {}
     -- перила
     WindowWasher.destroyRails()
+    WindowWasher.destroyRopes()
+
 end
 
 function WindowWasher.buildPlatformAt(cx, cy, cz)
@@ -409,6 +560,8 @@ function WindowWasher.buildPlatformAt(cx, cy, cz)
 
     WindowWasher.buildRailsAlongLine(cx, cy, cz)
     WindowWasher.buildRailsCaps(cx, cy, cz)
+    WindowWasher.buildRopes(cx, cy, cz)
+
 end
 
 -- совместимость с прежним API
