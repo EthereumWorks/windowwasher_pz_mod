@@ -8,3 +8,4 @@ icon=false
 version=1.0
 
 pack=ww_ropes
+tiledef=media/tiles/ww_ropes.tiles 4245

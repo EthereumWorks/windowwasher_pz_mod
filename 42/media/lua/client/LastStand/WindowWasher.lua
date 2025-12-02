@@ -6,7 +6,7 @@ if not ISContextMenu     then require "ISUI/ISContextMenu"              end
 WindowWasher = {}
 
 WindowWasher.Add = function()
-    addChallenge(WindowWasher);
+	addChallenge(WindowWasher);
 end
 
 -- ===== DEBUG HELPERS =========================================================
@@ -260,14 +260,14 @@ WindowWasher.ps = {
 WindowWasher.OnInitWorld = function()
 
     SandboxVars.Zombies = 1;
-    SandboxVars.Distribution = 1;
-    SandboxVars.DayLength = 3;
-    SandboxVars.StartMonth = 7;
-    SandboxVars.StartDay = 9;
-    SandboxVars.StartTime = 1;
+	SandboxVars.Distribution = 1;
+	SandboxVars.DayLength = 3;
+	SandboxVars.StartMonth = 7;
+	SandboxVars.StartDay = 9;
+	SandboxVars.StartTime = 1;
 
     SandboxVars.WaterShut = 2; SandboxVars.WaterShutModifier = 14;
-    SandboxVars.ElecShut  = 2; SandboxVars.ElecShutModifier  = 14;
+    SandboxVars.ElecShut  = 2; SandboxVars.ElecShutModifier = 14;
 
     SandboxVars.FoodLoot = 4; SandboxVars.CannedFoodLoot = 4;
     SandboxVars.RangedWeaponLoot = 3; SandboxVars.AmmoLoot = 4;
@@ -276,14 +276,14 @@ WindowWasher.OnInitWorld = function()
     SandboxVars.WeaponLoot = 4; SandboxVars.OtherLoot = 4;
     SandboxVars.LootItemRemovalList = "";
     SandboxVars.Temperature = 3; SandboxVars.Rain = 3;
-    SandboxVars.ErosionSpeed = 3
+	SandboxVars.ErosionSpeed = 3
     SandboxVars.Farming = 3; SandboxVars.NatureAbundance = 3;
     SandboxVars.PlantResilience = 3; SandboxVars.PlantAbundance = 3;
     SandboxVars.Alarm = 3; SandboxVars.LockedHouses = 3;
     SandboxVars.FoodRotSpeed = 4; SandboxVars.FridgeFactor = 4;
     SandboxVars.LootRespawn = 1; SandboxVars.StatsDecrease = 3;
     SandboxVars.StarterKit = false; SandboxVars.TimeSinceApo = 1;
-    SandboxVars.MultiHitZombies = false;
+	SandboxVars.MultiHitZombies = false;
 
     SandboxVars.MultiplierConfig = { XPMultiplierGlobal = 1, XPMultiplierGlobalToggle = true, }
     SandboxVars.ZombieConfig.PopulationMultiplier = ZombiePopulationMultiplier.Insane
@@ -364,7 +364,7 @@ end
 -- ====== ПЕРИЛА: утилиты (БЕЗ addWallN/W) ====================================
 
 -- Общий конструктор тайл-объекта по имени спрайта
-local function addRailSpriteAt(x, y, z, spriteName, label)
+local function addRailSpriteAt(x, y, z, spriteName, label, isDecorative)
     if not spriteName or spriteName == "" then return nil end
     local sq = getSquare(x, y, z); if not sq then return nil end
     local cell = getWorld():getCell()
@@ -374,6 +374,7 @@ local function addRailSpriteAt(x, y, z, spriteName, label)
     if not obj then return nil end
 
     if label then obj:setName(label) end
+    
     sq:AddTileObject(obj)                     -- ставим объект на клетку
     sq:RecalcAllWithNeighbours(true)
     table.insert(WindowWasher.ps.railObjs, obj)
@@ -381,26 +382,26 @@ local function addRailSpriteAt(x, y, z, spriteName, label)
 end
 
 -- Перила по северной грани клетки (используем спрайт с флагами WallN)
-local function addFenceN(x, y, z)
-    return addRailSpriteAt(x, y, z, WindowWasher.rails.N, "WW Rail N")
+local function addFenceN(x, y, z, isDecorative)
+    return addRailSpriteAt(x, y, z, WindowWasher.rails.N, "WW Rail N", isDecorative)
 end
 
 -- Перила по западной грани клетки (спрайт с флагами WallW)
-local function addFenceW(x, y, z)
-    return addRailSpriteAt(x, y, z, WindowWasher.rails.W, "WW Rail W")
+local function addFenceW(x, y, z, isDecorative)
+    return addRailSpriteAt(x, y, z, WindowWasher.rails.W, "WW Rail W", isDecorative)
 end
 
--- Торцевые перила (заглушки)
+-- Торцевые перила (заглушки) - для теста все декоративные
 function WindowWasher.buildRailsCaps(cx, cy, cz)
     if not (WindowWasher.rails and WindowWasher.rails.enabled) then return end
     local left, right = WW_spanLR(WindowWasher.ps.size)
 
     if WindowWasher.ps.orient == "EW" then
-        addFenceW(cx - left,     cy, cz)     -- западный торец
-        addFenceW(cx + right + 1, cy, cz)    -- восточный торец как «W» у соседа справа
+        addFenceW(cx - left,     cy, cz, true)     -- западный торец (для теста декоративные)
+        addFenceW(cx + right + 1, cy, cz, true)    -- восточный торец (для теста декоративные)
     else
-        addFenceN(cx, cy - left,     cz)     -- северный торец
-        addFenceN(cx, cy + right + 1, cz)    -- южный торец как «N» у соседа снизу
+        addFenceN(cx, cy - left,     cz, true)     -- северный торец (для теста декоративные)
+        addFenceN(cx, cy + right + 1, cz, true)    -- южный торец (для теста декоративные)
     end
 end
 
@@ -418,30 +419,48 @@ function WindowWasher.destroyRails()
     WindowWasher.ps.railObjs = {}
 end
 
--- Ставим перила вдоль длинных сторон платформы
+-- Ставим перила вдоль длинных сторон платформы (обе стороны)
 function WindowWasher.buildRailsAlongLine(cx, cy, cz)
-    if not (WindowWasher.rails and WindowWasher.rails.enabled) then return end
-    local left, right = WW_spanLR(WindowWasher.ps.size)
+	if not (WindowWasher.rails and WindowWasher.rails.enabled) then return end
+	local left, right = WW_spanLR(WindowWasher.ps.size)
 
-    if WindowWasher.ps.orient == "EW" then
-        local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.EW) or "S"
-        for x = cx - left, cx + right do
-            if side == "N" then
-                addFenceN(x, cy, cz)
-            else
-                addFenceN(x, cy + 1, cz) -- S = север соседа снизу
-            end
-        end
-    else
-        local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.NS) or "E"
-        for y = cy - left, cy + right do
-            if side == "W" then
-                addFenceW(cx, y, cz)
-            else
-                addFenceW(cx + 1, y, cz) -- E = запад соседа справа
-            end
-        end
-    end
+	if WindowWasher.ps.orient == "EW" then
+		local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.EW) or "S"
+		for x = cx - left, cx + right do
+			-- Перила на внешней стороне (фасад) - декоративные
+			if side == "N" then
+				addFenceN(x, cy, cz, true)  -- декоративные
+			else
+				addFenceN(x, cy + 1, cz, true) -- S = север соседа снизу, декоративные
+			end
+			-- Перила на внутренней стороне (противоположной внешней) - пропускаем средний сегмент
+			if x ~= cx then  -- пропускаем средний тайл (cx)
+				if side == "N" then
+					addFenceN(x, cy + 1, cz, true) -- внутренняя сторона (юг) - декоративные
+				else
+					addFenceN(x, cy, cz, true) -- внутренняя сторона (север) - декоративные
+				end
+			end
+		end
+	else
+		local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.NS) or "E"
+		for y = cy - left, cy + right do
+			-- Перила на внешней стороне (фасад) - декоративные
+			if side == "W" then
+				addFenceW(cx, y, cz, true)  -- декоративные
+			else
+				addFenceW(cx + 1, y, cz, true) -- E = запад соседа справа, декоративные
+			end
+			-- Перила на внутренней стороне (противоположной внешней) - пропускаем средний сегмент
+			if y ~= cy then  -- пропускаем средний тайл (cy)
+				if side == "W" then
+					addFenceW(cx + 1, y, cz, true) -- внутренняя сторона (восток) - декоративные
+				else
+					addFenceW(cx, y, cz, true) -- внутренняя сторона (запад) - декоративные
+				end
+			end
+		end
+	end
 end
 
 local function addRopeSpriteAt(x, y, z, spriteName, label)
@@ -1525,6 +1544,52 @@ local function movePlatformContents(oldCx, oldCy, oldCz, newCx, newCy, newCz, si
     end
 end
 
+-- Координаты точки электролебедки (где подвешена люлька тросами)
+WindowWasher.winchElectricX = 12785
+WindowWasher.winchElectricY = 1538
+WindowWasher.winchElectricZ = 26
+
+-- Проверка наличия электричества для электролебедки
+-- Проверяем через isNoPower() на клетке лебедки
+function WindowWasher.hasElectricityAtWinch()
+	local centerX = WindowWasher.winchElectricX
+	local centerY = WindowWasher.winchElectricY
+	local centerZ = WindowWasher.winchElectricZ
+	
+	local square = getSquare(centerX, centerY, centerZ)
+	
+	if not square then
+		print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): square NOT loaded, returning false", 
+			centerX, centerY, centerZ))
+		return false
+	end
+	
+	-- Проверяем электричество через isNoPower()
+	-- isNoPower() == false означает, что есть электричество
+	if type(square.isNoPower) == "function" then
+		local ok, noPower = pcall(function() return square:isNoPower() end)
+		
+		-- Выводим значение напрямую
+		print(string.format("[WW/ELECTRIC] Direct check: ok=%s, noPower=%s (type: %s)", 
+			tostring(ok), tostring(noPower), type(noPower)))
+        
+		if ok and noPower ~= nil then
+			local hasElectricity = not noPower  -- если нет электричества (noPower=true), то hasElectricity=false
+			print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): isNoPower=%s, hasElectricity=%s", 
+				centerX, centerY, centerZ, tostring(noPower), tostring(hasElectricity)))
+			return hasElectricity
+		else
+			print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): Error calling isNoPower(), returning false", 
+				centerX, centerY, centerZ))
+			return false
+		end
+	else
+		print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): isNoPower() method not found, returning false", 
+			centerX, centerY, centerZ))
+		return false
+	end
+end
+
 -- Длительности
 WindowWasher.ps.moveDurationElectric = 0.5   -- секунды на этаж
 WindowWasher.ps.moveDurationManual   = 1.5   -- дольше, игрок крутит руками
@@ -1603,14 +1668,24 @@ end
 
 
 function ISMovePlatformAction:isValid()
-    if not WW_isPlayerOnControlSquares(self.character) then return false end
-    if self.winchType == "manual" then
-        local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
-        if (self.character:getStats():getEndurance() or 0) <= thr then
-            return false
-        end
-    end
-    return true
+	if not WW_isPlayerOnControlSquares(self.character) then return false end
+	if self.winchType == "manual" then
+		local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
+		if (self.character:getStats():getEndurance() or 0) <= thr then
+			return false
+		end
+	elseif self.winchType == "electric" then
+		-- Проверка электричества для электролебедки
+		if WindowWasher.hasElectricityAtWinch and type(WindowWasher.hasElectricityAtWinch) == "function" then
+			if not WindowWasher.hasElectricityAtWinch() then
+				return false
+			end
+		else
+			print("[WW/ELECTRIC] ERROR: hasElectricityAtWinch function not found!")
+			return false
+		end
+	end
+	return true
 end
 
 function ISMovePlatformAction:start()
@@ -1756,15 +1831,26 @@ function WindowWasher.move(dx, dy, dz, playerObj, winchType)
         return
     end
 
-    -- ⬇️ мгновенный отказ, если сил не хватает для ручной лебёдки
-    if winchType == "manual" then
-        local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
-        if (p:getStats():getEndurance() or 0) <= thr then
-            -- тут без UI, просто тихо откажем
-            print(string.format("WW: manual move denied (endurance<=%.2f)", thr))
-            return
-        end
-    end
+	-- ⬇️ мгновенный отказ, если сил не хватает для ручной лебёдки
+	if winchType == "manual" then
+		local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
+		if (p:getStats():getEndurance() or 0) <= thr then
+			-- тут без UI, просто тихо откажем
+			print(string.format("WW: manual move denied (endurance<=%.2f)", thr))
+			return
+		end
+	elseif winchType == "electric" then
+		-- Проверка электричества для электролебедки
+		if WindowWasher.hasElectricityAtWinch and type(WindowWasher.hasElectricityAtWinch) == "function" then
+			if not WindowWasher.hasElectricityAtWinch() then
+				print("WW: electric move denied (no electricity at winch point)")
+				return
+			end
+		else
+			print("[WW/ELECTRIC] ERROR: hasElectricityAtWinch function not found!")
+			return
+		end
+	end
 
     ISTimedActionQueue.add(ISMovePlatformAction:new(p, dx, dy, dz, winchType))
 end
@@ -1812,16 +1898,22 @@ function WindowWasher.onFillWorldContextMenu(player, context, worldobjects, test
     local p = getSpecificPlayer(player); if not p then return end
     if not WindowWasher.isPlayerOnControlSquares(p) then return end
 
-    local root = context:addOption("Move Scaffold")
-    local sub  = ISContextMenu:getNew(context); context:addSubMenu(root, sub)
+	local root = context:addOption("Move Scaffold")
+	local sub  = ISContextMenu:getNew(context); context:addSubMenu(root, sub)
 
-    -- Электро
-    sub:addOption("Up (Electric)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "electric")
-    sub:addOption("Down (Electric)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "electric")
+	-- Электро (только если есть электричество)
+	if WindowWasher.hasElectricityAtWinch and type(WindowWasher.hasElectricityAtWinch) == "function" then
+		if WindowWasher.hasElectricityAtWinch() then
+			sub:addOption("Up (Electric)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "electric")
+			sub:addOption("Down (Electric)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "electric")
+		end
+	else
+		print("[WW/ELECTRIC] ERROR: hasElectricityAtWinch function not found in context menu!")
+	end
 
-    -- Ручная
-    sub:addOption("Up (Manual)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "manual")
-    sub:addOption("Down (Manual)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "manual")
+	-- Ручная (всегда доступна)
+	sub:addOption("Up (Manual)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "manual")
+	sub:addOption("Down (Manual)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "manual")
 end
 
 Events.OnFillWorldObjectContextMenu.Add(WindowWasher.onFillWorldContextMenu)
@@ -1960,7 +2052,7 @@ end
 -- ===== Player spawn =====
 WindowWasher.AddPlayer = function(playerNum, playerObj)
     if not playerObj or playerObj:getHoursSurvived() > 0 then return end
-    local function delayedTeleport()
+	local function delayedTeleport()
         local cx, cy, cz = WindowWasher.x, WindowWasher.y, WindowWasher.z
 
         WindowWasher.ps.size   = 3
@@ -1973,12 +2065,12 @@ WindowWasher.AddPlayer = function(playerNum, playerObj)
         WindowWasher.setupWindowWasherLoadout(playerObj)
 
         print(("WindowWasher: platform ready at %d,%d,%d"):format(cx,cy,cz))
-        Events.OnTick.Remove(delayedTeleport)
-    end
+		Events.OnTick.Remove(delayedTeleport)
+	end
 
     Events.OnTick.Add(delayedTeleport)
 end
-
+	
 
 
 WindowWasher.Render = function() end
