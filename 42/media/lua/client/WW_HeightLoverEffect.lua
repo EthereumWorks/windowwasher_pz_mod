@@ -2,7 +2,12 @@
 -- HeightLover: boredom-only logic (Stats + BodyDamage sync, safe logging)
 
 local HL = {
-    TraitName       = "WW_HeightLover",
+    -- B42: новый движковый трейт нельзя создать одним character_trait_definition
+    -- (объект CharacterTrait должен быть в реестре). Поэтому эффект включается по
+    -- ПРОФЕССИИ "Window Washer". Сопоставление по нормализованному имени профессии:
+    -- getName() в B42 — ResourceLocation-производная (lowercase), может вернуть
+    -- "ww:windowwasher" или "windowwasher"; нормализуем и ищем подстроку.
+    ProfMatch       = "windowwasher",
     Tier2Z          = 7,
     TickEveryFrames = 180,        -- ~3 сек при 60 FPS
 
@@ -27,10 +32,46 @@ rawset(_G, "WW_HL_DebugToggle", function()
 end)
 
 -- --- utils ------------------------------------------------------------------
-local function hasTrait(p, name) return p and name and p:getTraits() and p:HasTrait(name) end
+-- Имя профессии игрока (B42): p:getDescriptor():getCharacterProfession():getName().
+-- Нормализуем (убираем не-буквенно-цифровые, в нижний регистр), чтобы матч был
+-- устойчив к формату "ww:windowwasher" / "windowwasher" / возможной локализации.
+-- Возвращает true/false если профессию удалось прочитать, иначе nil ("не знаю").
+local function professionMatches(p, needle)
+    if not p then return nil end
+    local ok, name = pcall(function()
+        local d = p:getDescriptor()
+        local prof = d and d:getCharacterProfession()
+        return prof and prof:getName() or nil
+    end)
+    if not (ok and name) then return nil end
+    return (tostring(name):gsub("%W", ""):lower()):find(needle, 1, true) ~= nil
+end
+
+-- Кэшируем в ModData только ОПРЕДЕЛЁННЫЙ результат (профессия за игру не меняется);
+-- временный nil (дескриптор ещё не готов) не кэшируем, чтобы не выключить эффект навсегда.
+local function isWindowWasher(p)
+    if not p then return false end
+    local m = p:getModData(); m.WW = m.WW or {}
+    if m.WW.isWW == nil then
+        local r = professionMatches(p, HL.ProfMatch)
+        if r == nil then return false end
+        m.WW.isWW = r
+    end
+    return m.WW.isWW == true
+end
+
 local function worldHours() return getGameTime():getWorldAgeHours() end
 local function isTier2(p) return p and (p:getZ() or 0) >= (HL.Tier2Z or 7) end
 local function clamp01(x) if x < 0 then return 0 elseif x > 100 then return 100 end return x end
+
+-- B42: у Stats больше НЕТ boredom-методов (boredom переехал в BodyDamage с другим
+-- rate-based API). Старые Stats:getBoredom/setBoredom и BodyDamage:get/setBoredomLevel
+-- отсутствуют. Безопасные обёртки: вызываем метод только если он есть, иначе no-op/nil.
+-- Это держит эффект «живым» (детект + логи) без краша. Полная миграция boredom-механики
+-- на BodyDamage-API B42 — отдельная стадия.
+local function sGetBoredom(s)   if s  and s.getBoredom       then return s:getBoredom()       end return nil end
+local function sSetBoredom(s,v) if s  and s.setBoredom       then s:setBoredom(v)             end end
+local function bdGetLevel(bd)   if bd and bd.getBoredomLevel then return bd:getBoredomLevel() end return nil end
 
 -- Нелинейное накопление скуки (ед/мин) по дням без высоты
 local function boredomPerMinute(daysWithout)
@@ -58,7 +99,7 @@ end
 local function onHeightPulse(p)
     local s = p and p:getStats()
     local bd = p and p:getBodyDamage()
-    if s then s:setBoredom(0) end
+    sSetBoredom(s, 0)
     if bd and bd.setBoredomLevel then bd:setBoredomLevel(0) end
     md(p).lastHeightH = worldHours()
     log("height z=%d: boredom -> 0, boredomLevel -> 0", p:getZ() or -1)
@@ -87,7 +128,7 @@ end
 -- --- tick -------------------------------------------------------------------
 local frameAcc = 0
 local function HL_OnTick()
-    local p = getPlayer(); if not p or not hasTrait(p, HL.TraitName) then return end
+    local p = getPlayer(); if not p or not isWindowWasher(p) then return end
     frameAcc = frameAcc + 1; if frameAcc < (HL.TickEveryFrames or 180) then return end
     frameAcc, _dbgTickAcc = 0, _dbgTickAcc + 1
 
@@ -108,8 +149,8 @@ local function HL_OnTick()
         if HL.Debug.enabled and (_dbgTickAcc % (HL.Debug.statusEvery or 10) == 0) then
             log("status: on height z=%d, boredom=%.1f, level=%.1f",
                 p:getZ() or -1,
-                s and s:getBoredom() or -1,
-                p:getBodyDamage() and p:getBodyDamage():getBoredomLevel() or -1)
+                sGetBoredom(s) or -1,
+                bdGetLevel(p:getBodyDamage()) or -1)
         end
         return
     end
@@ -121,40 +162,28 @@ local function HL_OnTick()
 
     if s and ratePerMin > 0 then
         local add = ratePerMin * dtMin
-        local cur = s:getBoredom() or 0
+        local cur = sGetBoredom(s) or 0
         local target = clamp01(cur + add)
-        s:setBoredom(target)
+        sSetBoredom(s, target)
         syncBoredomLevelToStats(p, target, dtMin)
 
         log("tick: z=%d days=%.2f rate=%.3f/min dt=%.2fmin  boredom %.1f->%.1f  level->%.1f",
             p:getZ() or -1, daysAway, ratePerMin, dtMin,
             cur, target,
-            p:getBodyDamage() and p:getBodyDamage():getBoredomLevel() or -1)
+            bdGetLevel(p:getBodyDamage()) or -1)
     elseif HL.Debug.enabled and (_dbgTickAcc % (HL.Debug.statusEvery or 10) == 0) then
         log("status: days=%.2f no-gain (z=%d, boredom=%.1f, level=%.1f)",
             daysAway, p:getZ() or -1,
-            s and s:getBoredom() or -1,
-            p:getBodyDamage() and p:getBodyDamage():getBoredomLevel() or -1)
+            sGetBoredom(s) or -1,
+            bdGetLevel(p:getBodyDamage()) or -1)
     end
 end
 
--- Этап 0: однократный дамп трейтов игрока для эмпирической сверки имени,
--- которое ждёт HasTrait (см. задачу 0.3). Имя скрипт-трейта ww:WW_HeightLover
--- в рантайме = getType() = "WW_HeightLover" (совпадает с HL.TraitName).
-local function HL_DumpTraits(p)
-    if not (HL.Debug and HL.Debug.enabled and p) then return end
-    local ok, names = pcall(function()
-        local out, tl = {}, p:getTraits()
-        if tl then for i = 0, tl:size() - 1 do out[#out + 1] = tostring(tl:get(i)) end end
-        return table.concat(out, ", ")
-    end)
-    log("traits dump: [%s]", ok and names or "<error>")
-    log("HasTrait(%q) = %s", HL.TraitName, tostring(p:HasTrait(HL.TraitName)))
-end
-
 local function HL_OnCreatePlayer(_, p)
-    HL_DumpTraits(p)
-    if p and hasTrait(p, HL.TraitName) then initIfNeeded(p) end
+    if not p then return end
+    local isWW = isWindowWasher(p)
+    log("OnCreatePlayer: isWindowWasher=%s", tostring(isWW))
+    if isWW then initIfNeeded(p) end
 end
 Events.OnTick.Add(HL_OnTick)
 Events.OnCreatePlayer.Add(HL_OnCreatePlayer)
