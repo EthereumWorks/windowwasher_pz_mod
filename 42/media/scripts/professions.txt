@@ -8,6 +8,6 @@ module WW
         UIDescription = UI_prof_WindowWasherDesc,
         IconPathName = prof_WindowWasher,
         -- XPBoosts = Nimble=2;Sneak=1;Lightfoot=2,   -- пример, подставь свои
-        GrantedTraits = ww:heightlover,
+        GrantedTraits = ww:WW_HeightLover,
     }
 }

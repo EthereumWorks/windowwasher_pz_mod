@@ -21,7 +21,7 @@ sound WW_Winch_Manual_Loop
     maxInstancesPerEmitter = 1,
 
     clip {
-        file        = media/sound/ww_winch_manual_loop_.ogg,
+        file        = media/sound/ww_winch_manual_loop.ogg,
         distanceMin = 1,
         distanceMax = 10,
         volume      = 0.9,

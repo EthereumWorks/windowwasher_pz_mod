@@ -138,6 +138,23 @@ local function HL_OnTick()
     end
 end
 
-local function HL_OnCreatePlayer(_, p) if p and hasTrait(p, HL.TraitName) then initIfNeeded(p) end end
+-- Этап 0: однократный дамп трейтов игрока для эмпирической сверки имени,
+-- которое ждёт HasTrait (см. задачу 0.3). Имя скрипт-трейта ww:WW_HeightLover
+-- в рантайме = getType() = "WW_HeightLover" (совпадает с HL.TraitName).
+local function HL_DumpTraits(p)
+    if not (HL.Debug and HL.Debug.enabled and p) then return end
+    local ok, names = pcall(function()
+        local out, tl = {}, p:getTraits()
+        if tl then for i = 0, tl:size() - 1 do out[#out + 1] = tostring(tl:get(i)) end end
+        return table.concat(out, ", ")
+    end)
+    log("traits dump: [%s]", ok and names or "<error>")
+    log("HasTrait(%q) = %s", HL.TraitName, tostring(p:HasTrait(HL.TraitName)))
+end
+
+local function HL_OnCreatePlayer(_, p)
+    HL_DumpTraits(p)
+    if p and hasTrait(p, HL.TraitName) then initIfNeeded(p) end
+end
 Events.OnTick.Add(HL_OnTick)
 Events.OnCreatePlayer.Add(HL_OnCreatePlayer)
