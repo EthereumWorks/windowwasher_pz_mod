@@ -10,18 +10,34 @@ WindowWasher.Add = function()
 end
 
 -- ===== DEBUG HELPERS =========================================================
+-- B42: PropertyContainer:Is(IsoFlagType) переименован в :has(IsoFlagType),
+-- и часть констант IsoFlagType удалена/переименована (нет WallOverlayN/W,
+-- WallTopN/W, DoorN/W, WallTransN/W, WallSW). Этот хелпер nil-безопасен:
+-- неизвестное имя флага -> false, без "Object tried to call nil".
+local function WW_propHas(props, name)
+    if not props then return false end
+    local ok, r = pcall(function()
+        local fl = IsoFlagType[name]
+        if fl == nil then return false end
+        return props:has(fl) and true or false
+    end)
+    return ok and r or false
+end
+
+-- актуальные B42-имена структурных/настенных флагов (несуществующие просто игнорируются)
+local WW_FLAG_NAMES = {
+    "WallN","WallW","WallNW","WallSE",
+    "HoppableN","HoppableW","TallHoppableN","TallHoppableW",
+    "WindowN","WindowW","doorN","doorW","DoorWallN","DoorWallW",
+    "WallNTrans","WallWTrans","transparentN","transparentW",
+    "WallOverlay","FloorOverlay","solid","solidtrans",
+}
+
 local function WW_flagsToStr(props)
     if not props then return "(no-props)" end
-    local F = IsoFlagType
-    local names = {
-        "WallN","WallW","WallOverlayN","WallOverlayW","WallTopN","WallTopW",
-        "HoppableN","HoppableW","WindowN","WindowW","DoorN","DoorW",
-        "WallTransN","WallTransW"
-    }
     local t = {}
-    for _,n in ipairs(names) do
-        local ok, is = pcall(function() return props:Is(F[n]) end)
-        if ok and is then table.insert(t, n) end
+    for _,n in ipairs(WW_FLAG_NAMES) do
+        if WW_propHas(props, n) then table.insert(t, n) end
     end
     return #t>0 and table.concat(t,",") or "(none)"
 end
@@ -55,23 +71,40 @@ local function WW_checkSprite(name)
         print(("[WW/DBG] sprite '%s' = nil"):format(tostring(name)))
         return false
     end
-    local ok,isOverlay = pcall(function() return s:getProperties():Is(IsoFlagType.WallOverlayN) end)
-    print(("[WW/DBG] sprite '%s' -> %s  WallOverlayN=%s  flags=[%s]")
+    local isOverlay = WW_propHas(s:getProperties(), "WallOverlay")
+    print(("[WW/DBG] sprite '%s' -> %s  WallOverlay=%s  flags=[%s]")
           :format(tostring(name), tostring(s),
-                  tostring(ok and isOverlay or false),
+                  tostring(isOverlay),
                   WW_flagsToStr(s:getProperties())))
-    return ok and isOverlay
+    return isOverlay
 end
 
 
 -- ====== ТРОСЫ (только северные оверлеи) =====================================
+-- B42 МИГРАЦИЯ: спрайты тросов ОТКЛЮЧЕНЫ. Старый .tiles (текстовый B41) и .pack
+-- (магия PZPK) несовместимы с B42 (он ждёт бинарный tdef и свой формат пака) →
+-- "tiledef not found". Тросы декоративны, поэтому отключены до отдельного этапа.
+-- buildRopes() при enabled=false сразу выходит, ничего не строит и не спамит.
 WindowWasher.ropes = {
-    enabled = true,
+    enabled = false,
     N_left  = "rope_N_left",
     N_right = "rope_N_right",
 }
 
 WindowWasher.ropeObjs = {}
+
+-- B42: у Stats больше НЕТ getEndurance/setEndurance — выносливость стала
+-- CharacterStat.ENDURANCE (0..1), читается/пишется generic-методами Stats:get/set
+-- (см. ванильный ISStatsAndBody.lua). Старый вызов = nil → «Object tried to call nil».
+local function WW_getEndurance(s)
+    if not s then return 0 end
+    local ok, v = pcall(function() return s:get(CharacterStat.ENDURANCE) end)
+    return (ok and v) or 0
+end
+local function WW_setEndurance(s, v)
+    if not s then return end
+    pcall(function() s:set(CharacterStat.ENDURANCE, v) end)
+end
 
 -- ====== Endurance drain for manual winch (per floor) ======
 WindowWasher.stamina = WindowWasher.stamina or {}
@@ -145,7 +178,7 @@ do
         if _acc >= 30 then -- 5 сек при 60 тиков/сек
             local p = getPlayer()
             if p then
-                local e = p:getStats():getEndurance() or 0
+                local e = WW_getEndurance(p:getStats())
                 print(string.format("[WW/STA] Endurance: %.3f  (%.0f%%)", e, e*100))
             end
             _acc = 0
@@ -257,40 +290,67 @@ WindowWasher.ps = {
 }
 
 -- ===== Sandbox config =====
-WindowWasher.OnInitWorld = function()
+-- Два режима испытания (см. регистрацию внизу файла):
+--   Нормальный  — настройки мира как в Apocalypse (без респауна зомби);
+--   Хардкор     — как в «A Really CD DA» (жёсткий мир) + включённый респаун зомби.
+-- Фреймворк (LastStandSetup.preLoadLastStandInit) сам вызывает OnInitWorld выбранного
+-- режима, поэтому глобальный Events.OnInitWorld.Add больше НЕ нужен.
 
-    SandboxVars.Zombies = 1;
-	SandboxVars.Distribution = 1;
-	SandboxVars.DayLength = 3;
-	SandboxVars.StartMonth = 7;
-	SandboxVars.StartDay = 9;
-	SandboxVars.StartTime = 1;
-
-    SandboxVars.WaterShut = 2; SandboxVars.WaterShutModifier = 14;
-    SandboxVars.ElecShut  = 2; SandboxVars.ElecShutModifier = 14;
-
-    SandboxVars.FoodLoot = 4; SandboxVars.CannedFoodLoot = 4;
-    SandboxVars.RangedWeaponLoot = 3; SandboxVars.AmmoLoot = 4;
-    SandboxVars.SurvivalGearsLoot = 3; SandboxVars.MechanicsLoot = 5;
-    SandboxVars.LiteratureLoot = 4; SandboxVars.MedicalLoot = 4;
-    SandboxVars.WeaponLoot = 4; SandboxVars.OtherLoot = 4;
-    SandboxVars.LootItemRemovalList = "";
-    SandboxVars.Temperature = 3; SandboxVars.Rain = 3;
-	SandboxVars.ErosionSpeed = 3
-    SandboxVars.Farming = 3; SandboxVars.NatureAbundance = 3;
-    SandboxVars.PlantResilience = 3; SandboxVars.PlantAbundance = 3;
-    SandboxVars.Alarm = 3; SandboxVars.LockedHouses = 3;
-    SandboxVars.FoodRotSpeed = 4; SandboxVars.FridgeFactor = 4;
-    SandboxVars.LootRespawn = 1; SandboxVars.StatsDecrease = 3;
-    SandboxVars.StarterKit = false; SandboxVars.TimeSinceApo = 1;
-	SandboxVars.MultiHitZombies = false;
+-- Общее для обоих режимов (не зависит от сложности).
+WindowWasher.applyChallengeCommon = function()
+    -- Мировая карта полностью открыта с самого старта.
+    SandboxVars.Map = SandboxVars.Map or {}
+    SandboxVars.Map.AllowWorldMap = true
+    SandboxVars.Map.MapAllKnown   = true
 
     SandboxVars.MultiplierConfig = { XPMultiplierGlobal = 1, XPMultiplierGlobalToggle = true, }
+    SandboxVars.StarterKit = false
+    SandboxVars.LootItemRemovalList = ""
+end
+
+-- НОРМАЛЬНЫЙ: как Apocalypse. База новой игры уже ≈Apocalypse, поэтому переопределяем
+-- только ключевое: нормальная популяция и ВЫКЛЮЧЕННЫЙ респаун (как в Apocalypse).
+WindowWasher.applyNormalSandbox = function()
+    WindowWasher.applyChallengeCommon()
+    SandboxVars.StartMonth = 7; SandboxVars.StartDay = 9; SandboxVars.StartTime = 2
+    SandboxVars.ZombieConfig.PopulationMultiplier  = 0.65   -- Apocalypse Normal
+    SandboxVars.ZombieConfig.RespawnHours          = 0.0    -- респаун выкл
+    SandboxVars.ZombieConfig.RespawnUnseenHours    = 0.0
+    SandboxVars.ZombieConfig.RespawnMultiplier     = 0.0
+    print("[WW] sandbox: NORMAL (Apocalypse-like, no respawn)")
+end
+
+-- ХАРДКОР: значения мира как в «A Really CD DA» + максимум популяции + РЕСПАУН зомби.
+WindowWasher.applyHardcoreSandbox = function()
+    WindowWasher.applyChallengeCommon()
+    SandboxVars.Zombies        = 1
+    SandboxVars.Distribution   = 1
+    SandboxVars.DayLength      = 3
+    SandboxVars.StartMonth     = 12
+    SandboxVars.StartTime      = 2
+    SandboxVars.WaterShutModifier = -1
+    SandboxVars.ElecShutModifier  = -1
+    SandboxVars.Temperature    = 3
+    SandboxVars.Rain           = 3
+    SandboxVars.ErosionSpeed   = 1
+    SandboxVars.Farming        = 3
+    SandboxVars.NatureAbundance= 5
+    SandboxVars.PlantResilience= 3
+    SandboxVars.PlantAbundance = 3
+    SandboxVars.Alarm          = 3
+    SandboxVars.LockedHouses   = 3
+    SandboxVars.FoodRotSpeed   = 3
+    SandboxVars.FridgeFactor   = 3
+    SandboxVars.LootRespawn    = 1
+    SandboxVars.StatsDecrease  = 3
+    SandboxVars.TimeSinceApo   = 13
+    SandboxVars.MultiHitZombies= false
     SandboxVars.ZombieConfig.PopulationMultiplier = ZombiePopulationMultiplier.Insane
-
-    print ("Set to :" .. WindowWasher.x .. ", "..WindowWasher.y..", ".. WindowWasher.z)
-
-    Events.OnGameStart.Add(WindowWasher.OnGameStart);
+    -- РЕСПАУН зомби включён (в Apocalypse он выключен)
+    SandboxVars.ZombieConfig.RespawnHours       = 72.0
+    SandboxVars.ZombieConfig.RespawnUnseenHours = 16.0
+    SandboxVars.ZombieConfig.RespawnMultiplier  = 0.1
+    print("[WW] sandbox: HARDCORE (CDDA-like + zombie respawn)")
 end
 
 function WindowWasher.OnGameStart()
@@ -311,12 +371,14 @@ function WindowWasher.OnGameStart()
         end
     end
 
-    local function logSpriteFlags(name)
-        WW_checkSprite(name) -- печатает сразу всё нужное
-    end
-    
-    logSpriteFlags("rope_N_left")
-    logSpriteFlags("rope_N_right")
+    -- B42: спрайты тросов отключены (см. WindowWasher.ropes.enabled=false) —
+    -- диагностический дамп флагов rope-спрайтов закомментирован.
+    -- local function logSpriteFlags(name)
+    --     WW_checkSprite(name) -- печатает сразу всё нужное
+    -- end
+    --
+    -- logSpriteFlags("rope_N_left")
+    -- logSpriteFlags("rope_N_right")
 end
 
 -- вместо "half" будем везде считать left/right
@@ -942,18 +1004,19 @@ local function moveSimpleTileObjects(sqFrom, sqTo, platformSprite, railN, railW)
             end
 
             -- «структурные» тайлы и настенные оверлеи
+            -- B42: :Is -> :has (см. WW_propHas), и актуальные имена флагов
             if not skip then
                 local props = spr and spr:getProperties()
-                local F = _G.IsoFlagType
                 local isStructure = props and (
-                    props:Is(F.WallN) or props:Is(F.WallW) or
-                    props:Is(F.WallSE) or props:Is(F.WallSW) or
-                    props:Is(F.HoppableN) or props:Is(F.HoppableW) or
-                    props:Is(F.WindowN)   or props:Is(F.WindowW)   or
-                    props:Is(F.DoorN)     or props:Is(F.DoorW)     or
-                    props:Is(F.WallOverlayN) or props:Is(F.WallOverlayW) or
-                    props:Is(F.WallTopN)  or props:Is(F.WallTopW)  or
-                    props:Is(F.WallTransN) or props:Is(F.WallTransW)
+                    WW_propHas(props, "WallN")     or WW_propHas(props, "WallW")     or
+                    WW_propHas(props, "WallNW")    or WW_propHas(props, "WallSE")    or
+                    WW_propHas(props, "HoppableN") or WW_propHas(props, "HoppableW") or
+                    WW_propHas(props, "TallHoppableN") or WW_propHas(props, "TallHoppableW") or
+                    WW_propHas(props, "WindowN")   or WW_propHas(props, "WindowW")   or
+                    WW_propHas(props, "doorN")     or WW_propHas(props, "doorW")     or
+                    WW_propHas(props, "DoorWallN") or WW_propHas(props, "DoorWallW") or
+                    WW_propHas(props, "WallOverlay") or
+                    WW_propHas(props, "WallNTrans") or WW_propHas(props, "WallWTrans")
                 )
                 if isStructure then skip = true end
             end
@@ -1630,7 +1693,7 @@ local function WW_manualCostAndDuration(character, isDown)
     local duration    = baseDur * dirDur * md * (1 + math.min(0.50, owkg * 0.01)) -- +1% длительности на 1 кг, макс +50%
 
     -- штрафы на низкой выносливости (оставляем твою логику)
-    local e = character:getStats():getEndurance()
+    local e = WW_getEndurance(character:getStats())
     if e < 0.15 then
         staminaCost = staminaCost * 2.0
         duration    = duration    * 1.50
@@ -1671,7 +1734,7 @@ function ISMovePlatformAction:isValid()
 	if not WW_isPlayerOnControlSquares(self.character) then return false end
 	if self.winchType == "manual" then
 		local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
-		if (self.character:getStats():getEndurance() or 0) <= thr then
+		if WW_getEndurance(self.character:getStats()) <= thr then
 			return false
 		end
 	elseif self.winchType == "electric" then
@@ -1713,12 +1776,12 @@ function ISMovePlatformAction:update()
         local de = (self._totalDrain or 0) * inc
         if de > 0 then
             local s = self.character:getStats()
-            s:setEndurance(math.max(0, s:getEndurance() - de))
+            WW_setEndurance(s, math.max(0, WW_getEndurance(s) - de))
             self._drained = (self._drained or 0) + de
         end
 
         local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
-        if (self.character:getStats():getEndurance() or 0) <= thr then
+        if WW_getEndurance(self.character:getStats()) <= thr then
             self._exhaustedCancel = true
             -- Критично: именно forceStop(), иначе perform() всё равно вызовут
             self:forceStop()
@@ -1813,7 +1876,7 @@ function ISMovePlatformAction:perform()
         local remainder = math.max(0, (self._totalDrain or 0) - drained)
         if remainder > 0 then
             local s = self.character:getStats()
-            s:setEndurance(math.max(0, s:getEndurance() - remainder))
+            WW_setEndurance(s, math.max(0, WW_getEndurance(s) - remainder))
         end
     end
     WindowWasher.audio_stop()
@@ -1834,7 +1897,7 @@ function WindowWasher.move(dx, dy, dz, playerObj, winchType)
 	-- ⬇️ мгновенный отказ, если сил не хватает для ручной лебёдки
 	if winchType == "manual" then
 		local thr = WindowWasher.stamina.autoCancelThreshold or 0.12
-		if (p:getStats():getEndurance() or 0) <= thr then
+		if WW_getEndurance(p:getStats()) <= thr then
 			-- тут без UI, просто тихо откажем
 			print(string.format("WW: manual move denied (endurance<=%.2f)", thr))
 			return
@@ -1980,7 +2043,7 @@ function WindowWasher.setupWindowWasherLoadout(playerObj)
     local gloves    = inv:AddItem("Base.Gloves_LeatherGloves")
     local helmet    = inv:AddItem("Base.Hat_HardHat")
     local fanny     = inv:AddItem("Base.Bag_FannyPackFront")
-    local belt      = inv:AddItem("Base.Belt")
+    local belt      = inv:AddItem("Base.Belt2")   -- B42: "Base.Belt" переименован в "Base.Belt2"
 
     -- Порядок слоёв важен:
     WW_wear(playerObj, socks)
@@ -2000,18 +2063,22 @@ function WindowWasher.setupWindowWasherLoadout(playerObj)
         WW_wear(playerObj, watch) -- поставит по BodyLocation (ожидаемо "LeftWrist")
     end
 
-    -- Явные гарантийные проверки на проблемные слоты
-    pcall(function()
-        if not playerObj:getWornItem("Socks") and socks then
-            playerObj:setWornItem("Socks", socks)
-        end
-        if not playerObj:getWornItem("Hands") and gloves then
-            playerObj:setWornItem("Hands", gloves)
-        end
-        if not playerObj:getWornItem("Tshirt") and tshirt then
-            playerObj:setWornItem(tshirt:getBodyLocation(), tshirt)
-        end
-    end)
+    -- Явные гарантийные проверки на проблемные слоты.
+    -- B42: getWornItem/setWornItem принимают ItemBodyLocation, а НЕ строку
+    -- (строка → «expected argument of type ItemBodyLocation, got String»).
+    -- Берём слот у самого предмета через :getBodyLocation().
+    local function WW_ensureWorn(item)
+        if not item then return end
+        pcall(function()
+            local loc = item.getBodyLocation and item:getBodyLocation() or nil
+            if loc and playerObj:getWornItem(loc) ~= item then
+                playerObj:setWornItem(loc, item)
+            end
+        end)
+    end
+    WW_ensureWorn(socks)
+    WW_ensureWorn(gloves)
+    WW_ensureWorn(tshirt)
 
     -- ==== ДОП. СТАРТОВЫЙ ИНВЕНТАРЬ ===========================================
     local function WW_safeAdd(inv, fullType)
@@ -2036,11 +2103,6 @@ function WindowWasher.setupWindowWasherLoadout(playerObj)
     -- Вода в инвентарь (не в ланчбокс)
     local water = WW_safeAdd(inv, "Base.WaterBottle")
     WW_fillDrainable(water)
-
-    -- Сигареты и зажигалка
-    WW_safeAdd(inv, "Base.CigarettePack")
-    local lighter = WW_safeAdd(inv, "Base.LighterDisposable")
-    WW_fillDrainable(lighter)
 
     -- Две верёвки
     for i = 1, 2 do
@@ -2074,12 +2136,12 @@ end
 
 
 WindowWasher.Render = function() end
+-- фреймворк вызывает globalChallenge.RemovePlayer на смерть — без no-op будет nil-краш
+WindowWasher.RemovePlayer = function(_) end
 
--- ===== Challenge metadata =====
-WindowWasher.id = "WindowWasher";
+-- ===== Challenge metadata (общие для обоих режимов) =====
 WindowWasher.completionText = "The world ended while you were at work. You’re stuck on a scaffold, outside a skyscraper. Get in. Survive.";
 WindowWasher.image = "media/ui/Challenge_WindowWasher.png";
-WindowWasher.gameMode = "Window Washer";
 WindowWasher.world = "Muldraugh, KY";
 
 -- spawn coordinates in Louisville
@@ -2088,6 +2150,30 @@ WindowWasher.y = 1539;
 WindowWasher.z = 24;
 WindowWasher.hourOfDay = 7;
 
+-- ===== Два режима испытания =====
+-- Каждый режим — отдельная запись с уникальным id/gameMode и своим OnInitWorld,
+-- но с общей логикой платформы/спавна/эффекта (наследуется от WindowWasher).
+-- Имя/описание в меню берётся по ключам Challenge_<id>_name / _desc (Challenge.json).
+local function makeMode(id, gameMode, applySandbox)
+    local C = {}
+    for k, v in pairs(WindowWasher) do C[k] = v end   -- общие поля и функции
+    C.id       = id
+    C.gameMode = gameMode
+    C.OnInitWorld = function()
+        applySandbox()
+        print(("[WW] OnInitWorld mode=%s gameMode=%s"):format(id, gameMode))
+        Events.OnGameStart.Add(WindowWasher.OnGameStart)
+    end
+    return C
+end
+
+local NORMAL   = makeMode("WindowWasher",   "Window Washer",          WindowWasher.applyNormalSandbox)
+local HARDCORE = makeMode("WindowWasherHC", "Window Washer Hardcore", WindowWasher.applyHardcoreSandbox)
+
 -- ===== Register events =====
-Events.OnInitWorld.Add(WindowWasher.OnInitWorld)
-Events.OnChallengeQuery.Add(WindowWasher.Add)
+-- НЕ регистрируем OnInitWorld глобально — фреймворк сам вызывает OnInitWorld выбранного
+-- режима (иначе настройки протекали бы во все миры).
+Events.OnChallengeQuery.Add(function()
+    addChallenge(NORMAL)
+    addChallenge(HARDCORE)
+end)
