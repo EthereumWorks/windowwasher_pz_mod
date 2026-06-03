@@ -4,6 +4,3 @@ description=The world ended while you were at work. You are stuck on a scaffold,
 poster=poster.png
 icon=false
 version=1.0
-
-pack=ww_ropes
-tiledef=media/tiles/ww_ropes.tiles 4245

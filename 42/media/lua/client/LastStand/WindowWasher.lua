@@ -94,16 +94,26 @@ WindowWasher.ropes = {
 WindowWasher.ropeObjs = {}
 
 -- B42: у Stats больше НЕТ getEndurance/setEndurance — выносливость стала
--- CharacterStat.ENDURANCE (0..1), читается/пишется generic-методами Stats:get/set
--- (см. ванильный ISStatsAndBody.lua). Старый вызов = nil → «Object tried to call nil».
+-- CharacterStat.ENDURANCE (0..1). Читается через get(). ВАЖНО: расход делать ТОЛЬКО
+-- через remove() (как ванила — Farming/Camping: getStats():remove(CharacterStat.ENDURANCE,x)).
+-- set(CharacterStat.ENDURANCE, v) НЕ «прилипает»: endurance recharge-управляемый, и система
+-- восстановления перетирает заданное значение из lastEndurance → расход через set = no-op.
 local function WW_getEndurance(s)
     if not s then return 0 end
     local ok, v = pcall(function() return s:get(CharacterStat.ENDURANCE) end)
     return (ok and v) or 0
 end
-local function WW_setEndurance(s, v)
-    if not s then return end
-    pcall(function() s:set(CharacterStat.ENDURANCE, v) end)
+local function WW_drainEndurance(s, amount)
+    if not s or not amount or amount <= 0 then return end
+    pcall(function()
+        local probe = WindowWasher.debug and WindowWasher.debug.staminaProbe
+        local before = probe and s:get(CharacterStat.ENDURANCE) or nil
+        s:remove(CharacterStat.ENDURANCE, amount)
+        if before ~= nil then
+            print(string.format("[WW/STA] drain %.3f: endurance %.3f -> %.3f",
+                amount, before, s:get(CharacterStat.ENDURANCE)))
+        end
+    end)
 end
 
 -- ====== Endurance drain for manual winch (per floor) ======
@@ -169,6 +179,13 @@ WindowWasher.debug           = WindowWasher.debug or {}
 
 -- ==== DEBUG: stamina console probe ==========================================
 WindowWasher.debug.staminaProbe = false
+
+-- ==== DEBUG: форс-отключение городской сети (тест генераторной фазы) =========
+-- true  → при старте игры гасим городскую сеть (setHydroPowerOn(false)), и проверка
+--         питания лебёдки ИГНОРИРУЕТ сеть: электролебёдка работает только от генератора
+--         (haveElectricity на внутреннем тайле WindowWasher.genCheckX/Y/Z).
+-- false → обычное поведение (сеть работает, пока город не обесточится по времени).
+WindowWasher.debug.forceGridOff = false
 
 do
     local _acc = 0
@@ -292,7 +309,7 @@ WindowWasher.ps = {
 -- ===== Sandbox config =====
 -- Два режима испытания (см. регистрацию внизу файла):
 --   Нормальный  — настройки мира как в Apocalypse (без респауна зомби);
---   Хардкор     — как в «A Really CD DA» (жёсткий мир) + включённый респаун зомби.
+--   Хардкор     — ванильный пресет «Вымирание» (Extinction), кроме даты старта.
 -- Фреймворк (LastStandSetup.preLoadLastStandInit) сам вызывает OnInitWorld выбранного
 -- режима, поэтому глобальный Events.OnInitWorld.Add больше НЕ нужен.
 
@@ -306,13 +323,19 @@ WindowWasher.applyChallengeCommon = function()
     SandboxVars.MultiplierConfig = { XPMultiplierGlobal = 1, XPMultiplierGlobalToggle = true, }
     SandboxVars.StarterKit = false
     SandboxVars.LootItemRemovalList = ""
+
+    -- Разрешаем выращивать с/х культуры на крышах (и выше уровня земли) в обоих режимах.
+    -- ВАЖНО: PlaceDirtAboveground добавлен в extinctionSkipKeys, иначе пресет Extinction
+    -- (PlaceDirtAboveground = false) перетёр бы это значение в хардкоре.
+    SandboxVars.PlaceDirtAboveground = true
 end
 
 -- НОРМАЛЬНЫЙ: как Apocalypse. База новой игры уже ≈Apocalypse, поэтому переопределяем
 -- только ключевое: нормальная популяция и ВЫКЛЮЧЕННЫЙ респаун (как в Apocalypse).
 WindowWasher.applyNormalSandbox = function()
     WindowWasher.applyChallengeCommon()
-    SandboxVars.StartMonth = 7; SandboxVars.StartDay = 9; SandboxVars.StartTime = 2
+    -- Старт на 6 дней позже стандарта: вирус доходит до Луисвилля через 6 дней после обычного начала.
+    SandboxVars.StartMonth = 7; SandboxVars.StartDay = 15; SandboxVars.StartTime = 2
     SandboxVars.ZombieConfig.PopulationMultiplier  = 0.65   -- Apocalypse Normal
     SandboxVars.ZombieConfig.RespawnHours          = 0.0    -- респаун выкл
     SandboxVars.ZombieConfig.RespawnUnseenHours    = 0.0
@@ -320,43 +343,317 @@ WindowWasher.applyNormalSandbox = function()
     print("[WW] sandbox: NORMAL (Apocalypse-like, no respawn)")
 end
 
--- ХАРДКОР: значения мира как в «A Really CD DA» + максимум популяции + РЕСПАУН зомби.
+-- ХАРДКОР: ванильный пресет «Вымирание» (Extinction).
+-- WindowWasher.extinctionPreset ниже — ДОСЛОВНАЯ копия ванильного пресета
+-- media/lua/shared/Sandbox/Extinction.lua (Build 42.15). При применении в SandboxVars:
+--   • дату старта НЕ берём из пресета — ставим как в нормальном режиме (StartMonth=7/StartDay=15/StartTime=2);
+--   • Map (раскрытие карты), MultiplierConfig (XP) и StarterKit задаёт applyChallengeCommon
+--     — это решения мода, поэтому из пресета их НЕ копируем. Дополнительно: в рантайме
+--     SandboxVars.MultiplierConfig использует имена XPMultiplierGlobal*, а не Global, как в
+--     файле пресета, так что слепое копирование MultiplierConfig из пресета было бы неверным;
+--   • Version — это маркер версии файла пресета, не SandboxVar, поэтому пропускаем.
+WindowWasher.extinctionPreset = {
+    Version = 6,
+    Zombies = 3,
+    Distribution = 1,
+    ZombieVoronoiNoise = true,
+    ZombieRespawn = 2,
+    ZombieMigrate = true,
+    DayLength = 4,
+    StartYear = 1,
+    StartMonth = 7,
+    StartDay = 9,
+    StartTime = 2,
+    DayNightCycle = 1,
+    ClimateCycle = 1,
+    FogCycle = 1,
+    WaterShut = 2,
+    ElecShut = 2,
+    AlarmDecay = 2,
+    WaterShutModifier = 14,
+    ElecShutModifier = 14,
+    AlarmDecayModifier = 14,
+    FoodLootNew = 0.4,
+    LiteratureLootNew = 0.6,
+    SkillBookLoot = 0.4,
+    RecipeResourceLoot = 0.4,
+    MedicalLootNew = 0.4,
+    SurvivalGearsLootNew = 0.4,
+    CannedFoodLootNew = 0.4,
+    WeaponLootNew = 0.4,
+    RangedWeaponLootNew = 0.6,
+    AmmoLootNew = 0.2,
+    MechanicsLootNew = 0.6,
+    OtherLootNew = 0.4,
+    ClothingLootNew = 0.6,
+    ContainerLootNew = 0.4,
+    KeyLootNew = 0.4,
+    MediaLootNew = 0.4,
+    MementoLootNew = 0.6,
+    CookwareLootNew = 0.6,
+    MaterialLootNew = 0.6,
+    FarmingLootNew = 0.6,
+    ToolLootNew = 0.4,
+    RollsMultiplier = 1.0,
+    RemoveStoryLoot = false,
+    RemoveZombieLoot = false,
+    ZombiePopLootEffect = 10,
+    InsaneLootFactor = 0.05,
+    ExtremeLootFactor = 0.2,
+    RareLootFactor = 0.6,
+    NormalLootFactor = 1.0,
+    CommonLootFactor = 2.0,
+    AbundantLootFactor = 3.0,
+    Temperature = 3,
+    Rain = 3,
+    ErosionSpeed = 3,
+    ErosionDays = 0,
+    Farming = 3,
+    CompostTime = 2,
+    StatsDecrease = 3,
+    NatureAbundance = 2,
+    Alarm = 5,
+    LockedHouses = 6,
+    StarterKit = false,
+    Nutrition = true,
+    FoodRotSpeed = 3,
+    FridgeFactor = 3,
+    SeenHoursPreventLootRespawn = 0,
+    HoursForLootRespawn = 0,
+    MaxItemsForLootRespawn = 5,
+    ConstructionPreventsLootRespawn = true,
+    WorldItemRemovalList = "Base.Hat, Base.Glasses, Base.Maggots, Base.Slug, Base.Slug2, Base.Snail, Base.Worm, Base.Dung_Mouse, Base.Dung_Rat",
+    HoursForWorldItemRemoval = 24.0,
+    ItemRemovalListBlacklistToggle = false,
+    TimeSinceApo = 1,
+    PlantResilience = 4,
+    PlantAbundance = 3,
+    EndRegen = 3,
+    Helicopter = 3,
+    MetaEvent = 3,
+    SleepingEvent = 1,
+    GeneratorFuelConsumption = 0.1,
+    GeneratorSpawning = 2,
+    AnnotatedMapChance = 2,
+    CharacterFreePoints = 0,
+    ConstructionBonusPoints = 3,
+    NightDarkness = 1,
+    NightLength = 3,
+    BoneFracture = true,
+    InjurySeverity = 3,
+    HoursForCorpseRemoval = 216.0,
+    DecayingCorpseHealthImpact = 4,
+    ZombieHealthImpact = true,
+    BloodLevel = 3,
+    ClothingDegradation = 4,
+    FireSpread = true,
+    DaysForRottenFoodRemoval = -1,
+    AllowExteriorGenerator = true,
+    MaxFogIntensity = 1,
+    MaxRainFxIntensity = 1,
+    EnableSnowOnGround = true,
+    AttackBlockMovements = true,
+    SurvivorHouseChance = 2,
+    VehicleStoryChance = 3,
+    ZoneStoryChance = 3,
+    AllClothesUnlocked = false,
+    EnableTaintedWaterText = false,
+    EnableVehicles = true,
+    CarSpawnRate = 3,
+    ZombieAttractionMultiplier = 1.0,
+    VehicleEasyUse = false,
+    InitialGas = 2,
+    FuelStationGasInfinite = false,
+    FuelStationGasMin = 0.0,
+    FuelStationGasMax = 0.7,
+    FuelStationGasEmptyChance = 25,
+    LockedCar = 6,
+    CarGasConsumption = 1.0,
+    CarGeneralCondition = 2,
+    CarDamageOnImpact = 3,
+    DamageToPlayerFromHitByACar = 1,
+    TrafficJam = true,
+    CarAlarm = 4,
+    PlayerDamageFromCrash = true,
+    SirenShutoffHours = 0.0,
+    ChanceHasGas = 1,
+    RecentlySurvivorVehicles = 2,
+    MultiHitZombies = false,
+    RearVulnerability = 3,
+    SirenEffectsZombies = true,
+    AnimalStatsModifier = 4,
+    AnimalMetaStatsModifier = 4,
+    AnimalPregnancyTime = 4,
+    AnimalAgeModifier = 4,
+    AnimalMilkIncModifier = 4,
+    AnimalWoolIncModifier = 4,
+    AnimalRanchChance = 4,
+    AnimalGrassRegrowTime = 240,
+    AnimalMetaPredator = true,
+    AnimalMatingSeason = true,
+    AnimalEggHatch = 4,
+    AnimalSoundAttractZombies = true,
+    AnimalTrackChance = 4,
+    AnimalPathChance = 4,
+    MaximumRatIndex = 25,
+    DaysUntilMaximumRatIndex = 90,
+    MetaKnowledge = 3,
+    SeeNotLearntRecipe = true,
+    MaximumLootedBuildingRooms = 50,
+    EnablePoisoning = 1,
+    MaggotSpawn = 1,
+    LightBulbLifespan = 1.0,
+    FishAbundance = 2,
+    LevelForMediaXPCutoff = 3,
+    LevelForDismantleXPCutoff = 0,
+    BloodSplatLifespanDays = 0,
+    LiteratureCooldown = 90,
+    NegativeTraitsPenalty = 1,
+    MinutesPerPage = 2.0,
+    KillInsideCrops = true,
+    PlantGrowingSeasons = true,
+    PlaceDirtAboveground = false,
+    FarmingSpeedNew = 1.0,
+    FarmingAmountNew = 1.0,
+    MaximumLooted = 50,
+    DaysUntilMaximumLooted = 60,
+    RuralLooted = 1.0,
+    MaximumDiminishedLoot = 0,
+    DaysUntilMaximumDiminishedLoot = 1825,
+    MuscleStrainFactor = 1.0,
+    DiscomfortFactor = 1.0,
+    WoundInfectionFactor = 1.0,
+    NoBlackClothes = true,
+    EasyClimbing = false,
+    MaximumFireFuelHours = 8,
+    FirearmUseDamageChance = 2,
+    FirearmNoiseMultiplier = 1.25,
+    FirearmJamMultiplier = 1.25,
+    FirearmMoodleMultiplier = 1.25,
+    FirearmWeatherMultiplier = 1.25,
+    FirearmHeadGearEffect = true,
+    ClayLakeChance = 0.05,
+    ClayRiverChance = 0.05,
+    GeneratorTileRange = 20,
+    GeneratorVerticalPowerRange = 3,
+    Basement = {
+        SpawnFrequency = 4,
+    },
+    Map = {
+        AllowMiniMap = false,
+        AllowWorldMap = true,
+        MapAllKnown = false,
+        MapNeedsLight = true,
+    },
+    ZombieLore = {
+        Speed = 4,
+        SprinterPercentage = 6,
+        Strength = 1,
+        Toughness = 1,
+        Transmission = 1,
+        Mortality = 5,
+        Reanimate = 3,
+        Cognition = 4,
+        DoorOpeningPercentage = 10,
+        CrawlUnderVehicle = 6,
+        Memory = 1,
+        Sight = 2,
+        Hearing = 2,
+        SpottedLogic = true,
+        ThumpNoChasing = true,
+        ThumpOnConstruction = true,
+        ActiveOnly = 1,
+        TriggerHouseAlarm = true,
+        ZombiesDragDown = true,
+        ZombiesCrawlersDragDown = true,
+        ZombiesFenceLunge = true,
+        ZombiesArmorFactor = 2.0,
+        ZombiesMaxDefense = 90,
+        ChanceOfAttachedWeapon = 6,
+        ZombiesFallDamage = 1.0,
+        DisableFakeDead = 2,
+        PlayerSpawnZombieRemoval = 2,
+        FenceThumpersRequired = 20,
+        FenceDamageMultiplier = 1.5,
+    },
+    ZombieConfig = {
+        PopulationMultiplier = 1.2,
+        PopulationStartMultiplier = 1.5,
+        PopulationPeakMultiplier = 2.0,
+        PopulationPeakDay = 28,
+        RespawnHours = 72.0,
+        RespawnUnseenHours = 16.0,
+        RespawnMultiplier = 0.1,
+        RedistributeHours = 12.0,
+        FollowSoundDistance = 200,
+        RallyGroupSize = 10,
+        RallyGroupSizeVariance = 50,
+        RallyTravelDistance = 20,
+        RallyGroupSeparation = 15,
+        RallyGroupRadius = 3,
+        ZombiesCountBeforeDelete = 300,
+    },
+}
+
+-- Ключи пресета, которые НЕ применяем (см. комментарий выше):
+-- дату старта храним отдельно; Map/MultiplierConfig/StarterKit — задаёт common;
+-- PlaceDirtAboveground принудительно включаем в common (фарм на крышах), не из пресета.
+WindowWasher.extinctionSkipKeys = {
+    Version = true, StartYear = true, StartMonth = true, StartDay = true,
+    StartTime = true, Map = true, MultiplierConfig = true, StarterKit = true,
+    PlaceDirtAboveground = true,
+}
+
+-- Глубокое слияние таблицы пресета в SandboxVars (вложенные таблицы — рекурсивно,
+-- чтобы не затереть подключи, которые движок ожидает в ZombieLore/ZombieConfig).
+local function WW_mergePresetTable(dst, src)
+    for k, v in pairs(src) do
+        if type(v) == "table" then
+            if type(dst[k]) ~= "table" then dst[k] = {} end
+            WW_mergePresetTable(dst[k], v)
+        else
+            dst[k] = v
+        end
+    end
+end
+
 WindowWasher.applyHardcoreSandbox = function()
     WindowWasher.applyChallengeCommon()
-    SandboxVars.Zombies        = 1
-    SandboxVars.Distribution   = 1
-    SandboxVars.DayLength      = 3
-    SandboxVars.StartMonth     = 12
-    SandboxVars.StartTime      = 2
-    SandboxVars.WaterShutModifier = -1
-    SandboxVars.ElecShutModifier  = -1
-    SandboxVars.Temperature    = 3
-    SandboxVars.Rain           = 3
-    SandboxVars.ErosionSpeed   = 1
-    SandboxVars.Farming        = 3
-    SandboxVars.NatureAbundance= 5
-    SandboxVars.PlantResilience= 3
-    SandboxVars.PlantAbundance = 3
-    SandboxVars.Alarm          = 3
-    SandboxVars.LockedHouses   = 3
-    SandboxVars.FoodRotSpeed   = 3
-    SandboxVars.FridgeFactor   = 3
-    SandboxVars.LootRespawn    = 1
-    SandboxVars.StatsDecrease  = 3
-    SandboxVars.TimeSinceApo   = 13
-    SandboxVars.MultiHitZombies= false
-    SandboxVars.ZombieConfig.PopulationMultiplier = ZombiePopulationMultiplier.Insane
-    -- РЕСПАУН зомби включён (в Apocalypse он выключен)
-    SandboxVars.ZombieConfig.RespawnHours       = 72.0
-    SandboxVars.ZombieConfig.RespawnUnseenHours = 16.0
-    SandboxVars.ZombieConfig.RespawnMultiplier  = 0.1
-    print("[WW] sandbox: HARDCORE (CDDA-like + zombie respawn)")
+
+    -- Применяем весь пресет Extinction, кроме «защищённых» ключей.
+    for k, v in pairs(WindowWasher.extinctionPreset) do
+        if not WindowWasher.extinctionSkipKeys[k] then
+            if type(v) == "table" then
+                if type(SandboxVars[k]) ~= "table" then SandboxVars[k] = {} end
+                WW_mergePresetTable(SandboxVars[k], v)
+            else
+                SandboxVars[k] = v
+            end
+        end
+    end
+
+    -- Дату старта берём как в нормальном режиме (+6 дней от стандарта: 15 июля) — НЕ из пресета.
+    SandboxVars.StartMonth = 7
+    SandboxVars.StartDay   = 15
+    SandboxVars.StartTime  = 2
+
+    print("[WW] sandbox: HARDCORE (Extinction preset, start date kept)")
 end
 
 function WindowWasher.OnGameStart()
     if not WindowWasher._deathHooked then
         Events.OnPlayerDeath.Add(function(player) WindowWasher._onDeath(player) end)
         WindowWasher._deathHooked = true
+    end
+
+    -- ТЕСТ: погасить городскую сеть с самого старта, чтобы проверять генераторную фазу.
+    if WindowWasher.debug and WindowWasher.debug.forceGridOff then
+        local ok = pcall(function()
+            if getWorld().setHydroPowerOn then getWorld():setHydroPowerOn(false) end
+        end)
+        local cur = select(2, pcall(function() return getWorld():isHydroPowerOn() end))
+        print(string.format("[WW/ELECTRIC] forceGridOff: setHydroPowerOn(false) ok=%s, isHydroPowerOn=%s",
+            tostring(ok), tostring(cur)))
     end
 
     local ls = _G.LastStandData
@@ -414,6 +711,24 @@ end
 function WindowWasher.createSingleMetalFloor(x, y, z)
     local sq = getSquare(x, y, z)
     if not sq then return nil end
+
+    -- Если на клетке УЖЕ есть родной пол (земля/пол здания на нижнем уровне) —
+    -- НЕ кладём свой настил. addFloor занимает floor-слот клетки, поэтому наш
+    -- металлический пол оказался бы завязан на тот же слот, что и родной; при
+    -- уходе платформы вверх мы удаляли бы из ps.objs объект и сносили вместе с
+    -- ним родной пол нижнего уровня (дыра в полу). На «воздушных» уровнях фасада
+    -- пола нет (getFloor()==nil) — там настил кладём как обычно.
+    -- Клетку, у которой пол уже есть, просто НЕ отслеживаем (возвращаем nil) —
+    -- родной пол служит платформой на этом уровне и остаётся нетронутым.
+    local hasNativeFloor = false
+    pcall(function()
+        local f = sq.getFloor and sq:getFloor() or nil
+        if f and f:getSprite() then hasNativeFloor = true end
+    end)
+    if hasNativeFloor then
+        return nil
+    end
+
     local obj = sq:addFloor(WindowWasher.ps.sprite)  -- place REAL floor
     if obj then
         obj:setName("WindowWasher Platform")
@@ -830,9 +1145,12 @@ local function moveDeadBodies(sqFrom, sqTo, targetZ)
             local onFloor = nil; pcall(function() onFloor = body.isOnFloor and body:isOnFloor() end)
             WW_logDead("Move %s | before pos=(%s,%s,%s) onFloor=%s", tag,tostring(bx),tostring(by),tostring(bz),tostring(onFloor))
 
-            -- 1) вытащить из старой клетки (НЕ removeFromWorld)
-            local ok_rm = pcall(function() if body.removeFromSquare then body:removeFromSquare() end end)
-            WW_logDead("  removeFromSquare: %s", ok_rm and "OK" or "ERR")
+            -- 1) вытащить из старой клетки И из мира.
+            --    removeFromWorld нужен ОБЯЗАТЕЛЬНО: только после него последующий addToWorld
+            --    заново зарегистрирует труп в мире/чанке, на что опирается система вони/гниения.
+            local ok_rmw = pcall(function() if body.removeFromWorld then body:removeFromWorld() end end)
+            local ok_rm  = pcall(function() if body.removeFromSquare then body:removeFromSquare() end end)
+            WW_logDead("  removeFromWorld: %s, removeFromSquare: %s", ok_rmw and "OK" or "ERR", ok_rm and "OK" or "ERR")
 
             -- 2) позиция под целевую клетку
             local nx, ny, nz = (sqTo:getX()+0.5), (sqTo:getY()+0.5), targetZ
@@ -853,13 +1171,12 @@ local function moveDeadBodies(sqFrom, sqTo, targetZ)
             ensureListContains(dlTo, body, "sqTo:getDeadBodys()")
             ensureListContains(slTo, body, "sqTo:getStaticMovingObjects()")
 
-            -- 5) Вернуть в мир при необходимости
-            if body.isAddedToWorld and not body:isAddedToWorld() then
-                local ok_world = pcall(function() if body.addToWorld then body:addToWorld() end end)
-                WW_logDead("  addToWorld (needed): %s", ok_world and "OK" or "ERR")
-            else
-                WW_logDead("  addToWorld not needed")
-            end
+            -- 5) Вернуть в мир БЕЗУСЛОВНО.
+            --    Раньше addToWorld вызывался только если isAddedToWorld()==false, но removeFromSquare
+            --    не сбрасывает этот флаг -> регистрация трупа в мире оставалась "несвежей" и мудл вони
+            --    не следовал за платформой. Теперь после removeFromWorld всегда регистрируем заново.
+            local ok_world = pcall(function() if body.addToWorld then body:addToWorld() end end)
+            WW_logDead("  addToWorld (unconditional): %s", ok_world and "OK" or "ERR")
 
             -- 6) Стабилизация
             local ok_stab = pcall(function()
@@ -1612,45 +1929,52 @@ WindowWasher.winchElectricX = 12785
 WindowWasher.winchElectricY = 1538
 WindowWasher.winchElectricZ = 26
 
--- Проверка наличия электричества для электролебедки
--- Проверяем через isNoPower() на клетке лебедки
+-- Точка проверки ГЕНЕРАТОРНОГО питания — ВНУТРЕННИЙ запитанный тайл здания.
+-- Внешний тайл лебёдки в электросеть не включён, поэтому haveElectricity()/isNoPower()
+-- на нём всегда возвращают «нет питания» даже при работающем генераторе или живой сети
+-- (см. memory electric-winch-power-check). Поэтому генератор сэмплим на интерьерном тайле.
+-- Ближайший ВНУТРЕННИЙ (запитанный) тайл к электролебёдке — для детекта генератора.
+WindowWasher.genCheckX = 12780
+WindowWasher.genCheckY = 1536
+WindowWasher.genCheckZ = 26
+
+-- Проверка наличия электричества для электролебёдки.
+-- Питание есть, если: (A) включена городская сеть (getWorld():isHydroPowerOn()),
+-- ИЛИ (B) внутренний тайл genCheck запитан (haveElectricity() — генератор/сеть).
+-- Тестовый тумблер WindowWasher.debug.forceGridOff пропускает ветку (A) — остаётся только генератор.
 function WindowWasher.hasElectricityAtWinch()
-	local centerX = WindowWasher.winchElectricX
-	local centerY = WindowWasher.winchElectricY
-	local centerZ = WindowWasher.winchElectricZ
-	
-	local square = getSquare(centerX, centerY, centerZ)
-	
-	if not square then
-		print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): square NOT loaded, returning false", 
-			centerX, centerY, centerZ))
-		return false
+	local dbg = WindowWasher.debug or {}
+
+	-- (A) Городская сеть
+	if dbg.forceGridOff then
+		print("[WW/ELECTRIC] forceGridOff: городская сеть игнорируется (тест генератора)")
+	else
+		local ok, grid = pcall(function() return getWorld():isHydroPowerOn() end)
+		print(string.format("[WW/ELECTRIC] grid: isHydroPowerOn=%s", tostring(ok and grid)))
+		if ok and grid then return true end
 	end
-	
-	-- Проверяем электричество через isNoPower()
-	-- isNoPower() == false означает, что есть электричество
-	if type(square.isNoPower) == "function" then
-		local ok, noPower = pcall(function() return square:isNoPower() end)
-		
-		-- Выводим значение напрямую
-		print(string.format("[WW/ELECTRIC] Direct check: ok=%s, noPower=%s (type: %s)", 
-			tostring(ok), tostring(noPower), type(noPower)))
-        
-		if ok and noPower ~= nil then
-			local hasElectricity = not noPower  -- если нет электричества (noPower=true), то hasElectricity=false
-			print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): isNoPower=%s, hasElectricity=%s", 
-				centerX, centerY, centerZ, tostring(noPower), tostring(hasElectricity)))
-			return hasElectricity
+
+	-- (B1) Генератор: haveElectricity() на внутреннем запитанном тайле (надёжный способ)
+	local gx, gy, gz = WindowWasher.genCheckX, WindowWasher.genCheckY, WindowWasher.genCheckZ
+	if gx and gy and gz then
+		local sq = getSquare(gx, gy, gz)
+		if sq then
+			local ok, e = pcall(function() return sq:haveElectricity() end)
+			print(string.format("[WW/ELECTRIC] gen interior (%d,%d,%d): haveElectricity=%s",
+				gx, gy, gz, tostring(ok and e)))
+			if ok and e then return true end
 		else
-			print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): Error calling isNoPower(), returning false", 
-				centerX, centerY, centerZ))
-			return false
+			print(string.format("[WW/ELECTRIC] gen interior (%d,%d,%d): square NOT loaded", gx, gy, gz))
 		end
 	else
-		print(string.format("[WW/ELECTRIC] Point (%d,%d,%d): isNoPower() method not found, returning false", 
-			centerX, centerY, centerZ))
-		return false
+		print("[WW/ELECTRIC] genCheckX/Y/Z не заданы — генераторная фаза не проверяется")
 	end
+
+	-- (примечание) Прямую проверку генератора на ВНЕШНЕМ тайле лебёдки
+	-- (isGeneratorPoweringSquare) убрали: в B42 она кидает RuntimeException, а внешний
+	-- тайл всё равно не запитан. Генератор сэмплим на внутреннем тайле genCheck (ветка B1).
+
+	return false
 end
 
 -- Длительности
@@ -1776,7 +2100,7 @@ function ISMovePlatformAction:update()
         local de = (self._totalDrain or 0) * inc
         if de > 0 then
             local s = self.character:getStats()
-            WW_setEndurance(s, math.max(0, WW_getEndurance(s) - de))
+            WW_drainEndurance(s, de)
             self._drained = (self._drained or 0) + de
         end
 
@@ -1876,7 +2200,7 @@ function ISMovePlatformAction:perform()
         local remainder = math.max(0, (self._totalDrain or 0) - drained)
         if remainder > 0 then
             local s = self.character:getStats()
-            WW_setEndurance(s, math.max(0, WW_getEndurance(s) - remainder))
+            WW_drainEndurance(s, remainder)
         end
     end
     WindowWasher.audio_stop()

@@ -1,5 +1,6 @@
 -- 42/media/lua/client/WW_HeightLoverEffect.lua
--- HeightLover: boredom-only logic (Stats + BodyDamage sync, safe logging)
+-- HeightLover: boredom-механика на B42-API (CharacterStat.BOREDOM via Stats:get/set).
+-- На высоте (z>=Tier2Z) скука обнуляется; внизу растёт по дням без высоты.
 
 local HL = {
     -- B42: новый движковый трейт нельзя создать одним character_trait_definition
@@ -10,10 +11,6 @@ local HL = {
     ProfMatch       = "windowwasher",
     Tier2Z          = 7,
     TickEveryFrames = 180,        -- ~3 сек при 60 FPS
-
-    -- Инерция синхронизации boredomLevel (ед/мин):
-    LevelRisePerMin = 40.0,       -- насколько быстро подъём догоняет цель
-    LevelFallPerMin = 20.0,       -- насколько быстро спад догоняет цель
 
     Debug = { enabled = true, tag = "[HL]", statusEvery = 10 },
 }
@@ -62,16 +59,40 @@ end
 
 local function worldHours() return getGameTime():getWorldAgeHours() end
 local function isTier2(p) return p and (p:getZ() or 0) >= (HL.Tier2Z or 7) end
-local function clamp01(x) if x < 0 then return 0 elseif x > 100 then return 100 end return x end
 
--- B42: у Stats больше НЕТ boredom-методов (boredom переехал в BodyDamage с другим
--- rate-based API). Старые Stats:getBoredom/setBoredom и BodyDamage:get/setBoredomLevel
--- отсутствуют. Безопасные обёртки: вызываем метод только если он есть, иначе no-op/nil.
--- Это держит эффект «живым» (детект + логи) без краша. Полная миграция boredom-механики
--- на BodyDamage-API B42 — отдельная стадия.
-local function sGetBoredom(s)   if s  and s.getBoredom       then return s:getBoredom()       end return nil end
-local function sSetBoredom(s,v) if s  and s.setBoredom       then s:setBoredom(v)             end end
-local function bdGetLevel(bd)   if bd and bd.getBoredomLevel then return bd:getBoredomLevel() end return nil end
+-- B42 boredom-API (сверено с jar rev 964): boredom — это CharacterStat.BOREDOM (0..100),
+-- читается/пишется generic-методами Stats:get/set(CharacterStat, value) (как в ванильном
+-- DebugUIs/.../ISStatsAndBody.lua). Старых Stats:get/setBoredom и BodyDamage:get/setBoredomLevel
+-- из B41 НЕТ. Резолвим стат и его диапазон один раз, с защитой на случай раннего/иного загруза.
+local BOREDOM, B_MIN, B_MAX
+do
+    local ok = pcall(function()
+        if CharacterStat and CharacterStat.BOREDOM then
+            BOREDOM = CharacterStat.BOREDOM
+            B_MIN = BOREDOM:getMinimumValue()
+            B_MAX = BOREDOM:getMaximumValue()
+        end
+    end)
+    if not (ok and BOREDOM) then BOREDOM = nil end
+    B_MIN = B_MIN or 0
+    B_MAX = B_MAX or 100
+end
+
+local function clampB(x) if x < B_MIN then return B_MIN elseif x > B_MAX then return B_MAX end return x end
+
+-- Чтение/запись boredom через Stats (в MP — досылаем стат на сервер, как ванильный код).
+local function getBoredom(p)
+    if not (p and BOREDOM) then return nil end
+    local ok, v = pcall(function() return p:getStats():get(BOREDOM) end)
+    return ok and v or nil
+end
+local function setBoredom(p, v)
+    if not (p and BOREDOM) then return end
+    pcall(function()
+        p:getStats():set(BOREDOM, clampB(v))
+        if isClient and isClient() then sendPlayerStat(p, BOREDOM) end
+    end)
+end
 
 -- Нелинейное накопление скуки (ед/мин) по дням без высоты
 local function boredomPerMinute(daysWithout)
@@ -95,34 +116,11 @@ local function initIfNeeded(p)
     log("init: lastHeightH=%.2fh z=%d", now, p and p:getZ() or -1)
 end
 
--- Мгновенная очистка на высоте (обе шкалы)
+-- Мгновенная очистка скуки на высоте (мойщик окон обожает высоту).
 local function onHeightPulse(p)
-    local s = p and p:getStats()
-    local bd = p and p:getBodyDamage()
-    sSetBoredom(s, 0)
-    if bd and bd.setBoredomLevel then bd:setBoredomLevel(0) end
+    setBoredom(p, B_MIN)
     md(p).lastHeightH = worldHours()
-    log("height z=%d: boredom -> 0, boredomLevel -> 0", p:getZ() or -1)
-end
-
--- Притяжение boredomLevel к целевому Stats.boredom с инерцией.
--- dtMin — прошедшие минуты; up/down ограничивают скорость изменения level.
-local function syncBoredomLevelToStats(p, target, dtMin)
-    local bd = p and p:getBodyDamage()
-    if not (bd and bd.getBoredomLevel and bd.setBoredomLevel) then return end
-    local cur = bd:getBoredomLevel() or 0
-    local delta = (target or 0) - cur
-    if delta == 0 then return end
-
-    local rate = (delta > 0) and (HL.LevelRisePerMin or 40.0) or (HL.LevelFallPerMin or 20.0)
-    local step = rate * math.max(0, dtMin or 0)
-    local new
-    if delta > 0 then
-        new = (math.abs(delta) <= step) and target or (cur + step)
-    else
-        new = (math.abs(delta) <= step) and target or (cur - step)
-    end
-    bd:setBoredomLevel(clamp01(new))
+    log("height z=%d: boredom -> %.1f", p:getZ() or -1, B_MIN)
 end
 
 -- --- tick -------------------------------------------------------------------
@@ -141,41 +139,33 @@ local function HL_OnTick()
     if dtH <= 0 then return end
 
     local dtMin = dtH * 60.0
-    local s  = p:getStats()
 
     -- На высоте — мгновенная очистка
     if isTier2(p) then
         onHeightPulse(p)
         if HL.Debug.enabled and (_dbgTickAcc % (HL.Debug.statusEvery or 10) == 0) then
-            log("status: on height z=%d, boredom=%.1f, level=%.1f",
-                p:getZ() or -1,
-                sGetBoredom(s) or -1,
-                bdGetLevel(p:getBodyDamage()) or -1)
+            log("status: on height z=%d, boredom=%.1f",
+                p:getZ() or -1, getBoredom(p) or -1)
         end
         return
     end
 
-    -- Внизу — растим Stats.boredom и подтягиваем BodyDamage.boredomLevel
+    -- Внизу — растим boredom (CharacterStat.BOREDOM) по дням без высоты
     local hoursAway  = math.max(0, nowH - (m.lastHeightH or nowH))
     local daysAway   = hoursAway / 24.0
     local ratePerMin = boredomPerMinute(daysAway)
 
-    if s and ratePerMin > 0 then
-        local add = ratePerMin * dtMin
-        local cur = sGetBoredom(s) or 0
-        local target = clamp01(cur + add)
-        sSetBoredom(s, target)
-        syncBoredomLevelToStats(p, target, dtMin)
+    if BOREDOM and ratePerMin > 0 then
+        local add    = ratePerMin * dtMin
+        local cur    = getBoredom(p) or 0
+        local target = clampB(cur + add)
+        setBoredom(p, target)
 
-        log("tick: z=%d days=%.2f rate=%.3f/min dt=%.2fmin  boredom %.1f->%.1f  level->%.1f",
-            p:getZ() or -1, daysAway, ratePerMin, dtMin,
-            cur, target,
-            bdGetLevel(p:getBodyDamage()) or -1)
+        log("tick: z=%d days=%.2f rate=%.3f/min dt=%.2fmin  boredom %.1f->%.1f",
+            p:getZ() or -1, daysAway, ratePerMin, dtMin, cur, target)
     elseif HL.Debug.enabled and (_dbgTickAcc % (HL.Debug.statusEvery or 10) == 0) then
-        log("status: days=%.2f no-gain (z=%d, boredom=%.1f, level=%.1f)",
-            daysAway, p:getZ() or -1,
-            sGetBoredom(s) or -1,
-            bdGetLevel(p:getBodyDamage()) or -1)
+        log("status: days=%.2f no-gain (z=%d, boredom=%.1f)",
+            daysAway, p:getZ() or -1, getBoredom(p) or -1)
     end
 end
 
