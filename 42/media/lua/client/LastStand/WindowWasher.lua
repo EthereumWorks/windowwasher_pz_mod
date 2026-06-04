@@ -302,6 +302,7 @@ WindowWasher.ps = {
     sprite = "constructedobjects_01_86",   -- metal floor sprite
     objs = {},                             -- created floor objects (to remove)
     railObjs = {},                         -- созданные объекты перил (стены)
+    savedFloors = {},                      -- "x,y,z" -> имя спрайта родного пола под платформой (для восстановления)
     moving = false,
     moveDuration = 0.5                     -- seconds (UX)
 }
@@ -708,26 +709,78 @@ end
 
 
 -- ===== Floor placement (single tile) =====
+
+-- Ключ клетки для таблицы сохранённых родных полов
+local function WW_floorKey(x, y, z)
+    return string.format("%d,%d,%d", x, y, z)
+end
+
+-- Запомнить и СНЯТЬ родной пол клетки (земля/пол здания), чтобы потом восстановить.
+-- Делаем это явно (а не полагаемся на поведение addFloor): сохраняем имя спрайта
+-- родного пола и физически удаляем его объект, освобождая floor-слот под наш настил.
+-- Это гарантирует, что родной пол не «уедет» вверх вместе с платформой через
+-- moveSimpleTileObjects (он его считал бы обычным декором) и будет корректно
+-- возвращён на место, когда платформа уйдёт с этого уровня.
+local function WW_stashNativeFloor(sq)
+    if not sq then return end
+    local x, y, z = sq:getX(), sq:getY(), sq:getZ()
+    local key = WW_floorKey(x, y, z)
+    if WindowWasher.ps.savedFloors[key] ~= nil then return end  -- уже сохранён
+
+    local f = nil
+    pcall(function() f = sq.getFloor and sq:getFloor() or nil end)
+    if not f then return end
+
+    local nm = nil
+    pcall(function() local s = f:getSprite(); nm = s and s:getName() end)
+    -- сохраняем только настоящий родной пол (не наш металлический настил)
+    if not nm or nm == "" or nm == WindowWasher.ps.sprite then return end
+
+    WindowWasher.ps.savedFloors[key] = nm
+    pcall(function() sq:RemoveTileObject(f) end)
+    pcall(function() sq:DeleteTileObject(f) end)
+end
+
+-- Восстановить родной пол на клетке (если он был сохранён) и забыть запись.
+function WindowWasher.restoreNativeFloorAt(x, y, z)
+    local key = WW_floorKey(x, y, z)
+    local nm = WindowWasher.ps.savedFloors[key]
+    if not nm then return end
+    WindowWasher.ps.savedFloors[key] = nil
+
+    local sq = getSquare(x, y, z)
+    if not sq then return end
+    pcall(function()
+        local obj = sq:addFloor(nm)
+        if obj then sq:RecalcAllWithNeighbours(true) end
+    end)
+end
+
+-- Восстановить ВСЕ сохранённые родные полы (используется при полном сносе платформы).
+function WindowWasher.restoreAllNativeFloors()
+    for key, nm in pairs(WindowWasher.ps.savedFloors) do
+        local sx, sy, sz = string.match(key, "(-?%d+),(-?%d+),(-?%d+)")
+        if sx then
+            local sq = getSquare(tonumber(sx), tonumber(sy), tonumber(sz))
+            if sq then
+                pcall(function()
+                    local obj = sq:addFloor(nm)
+                    if obj then sq:RecalcAllWithNeighbours(true) end
+                end)
+            end
+        end
+    end
+    WindowWasher.ps.savedFloors = {}
+end
+
 function WindowWasher.createSingleMetalFloor(x, y, z)
     local sq = getSquare(x, y, z)
     if not sq then return nil end
 
-    -- Если на клетке УЖЕ есть родной пол (земля/пол здания на нижнем уровне) —
-    -- НЕ кладём свой настил. addFloor занимает floor-слот клетки, поэтому наш
-    -- металлический пол оказался бы завязан на тот же слот, что и родной; при
-    -- уходе платформы вверх мы удаляли бы из ps.objs объект и сносили вместе с
-    -- ним родной пол нижнего уровня (дыра в полу). На «воздушных» уровнях фасада
-    -- пола нет (getFloor()==nil) — там настил кладём как обычно.
-    -- Клетку, у которой пол уже есть, просто НЕ отслеживаем (возвращаем nil) —
-    -- родной пол служит платформой на этом уровне и остаётся нетронутым.
-    local hasNativeFloor = false
-    pcall(function()
-        local f = sq.getFloor and sq:getFloor() or nil
-        if f and f:getSprite() then hasNativeFloor = true end
-    end)
-    if hasNativeFloor then
-        return nil
-    end
+    -- Если на клетке есть родной пол (нижний уровень: земля/пол здания) —
+    -- сохраняем его и снимаем, чтобы потом вернуть; затем кладём наш настил.
+    -- Так металлический пол виден и на нижнем уровне, а родной пол не теряется.
+    WW_stashNativeFloor(sq)
 
     local obj = sq:addFloor(WindowWasher.ps.sprite)  -- place REAL floor
     if obj then
@@ -934,6 +987,8 @@ function WindowWasher.destroyPlatform()
     -- перила
     WindowWasher.destroyRails()
     WindowWasher.destroyRopes()
+    -- вернуть все родные полы, которые были сняты под настил платформы
+    WindowWasher.restoreAllNativeFloors()
 
 end
 
@@ -1286,6 +1341,13 @@ local function moveSimpleTileObjects(sqFrom, sqTo, platformSprite, railN, railW)
     if not (objs and sqTo) then return end
     local cell = getWorld():getCell()
 
+    -- Пол клетки НИКОГДА не переносим как «простой» объект: иначе родной пол
+    -- нижнего уровня уехал бы вверх вместе с платформой. Наш настил отдельно
+    -- отсекается по имени спрайта ниже, а сохранение/возврат родного пола делает
+    -- WW_stashNativeFloor/restoreNativeFloorAt.
+    local fromFloor = nil
+    pcall(function() fromFloor = sqFrom.getFloor and sqFrom:getFloor() or nil end)
+
     local function hasPrefix(s, p)
         return s and p and string.sub(s, 1, #p) == p
     end
@@ -1300,6 +1362,11 @@ local function moveSimpleTileObjects(sqFrom, sqTo, platformSprite, railN, railW)
 
             -- наш пол / наши перила
             if sname == platformSprite or sname == railN or sname == railW then
+                skip = true
+            end
+
+            -- любой пол клетки (родной пол не должен «уезжать» вверх)
+            if (not skip) and fromFloor and obj == fromFloor then
                 skip = true
             end
 
@@ -2182,6 +2249,13 @@ function ISMovePlatformAction:perform()
     destroyTileObjectList(oldRails)
     destroyTileObjectList(oldFloors)
 
+    -- 4) Вернуть родные полы на СТАРЫХ клетках платформы (если они там были сняты
+    --    под наш настил). Делать это нужно ПОСЛЕ удаления старого металлического
+    --    настила, чтобы родной пол занял освободившийся floor-слот.
+    for _, sq in ipairs(fromList) do
+        if sq then WindowWasher.restoreNativeFloorAt(sq:getX(), sq:getY(), sq:getZ()) end
+    end
+
     -- Меняем только высоту персонажа, X/Y сохраняем полностью
         local px = self.character:getX()
         local py = self.character:getY()
@@ -2493,6 +2567,10 @@ end
 
 local NORMAL   = makeMode("WindowWasher",   "Window Washer",          WindowWasher.applyNormalSandbox)
 local HARDCORE = makeMode("WindowWasherHC", "Window Washer Hardcore", WindowWasher.applyHardcoreSandbox)
+
+-- normal оставляет базовую картинку (Challenge_WindowWasher.png),
+-- hardcore — своя картинка
+HARDCORE.image = "media/ui/Challenge_WindowWasher_hard.png";
 
 -- ===== Register events =====
 -- НЕ регистрируем OnInitWorld глобально — фреймворк сам вызывает OnInitWorld выбранного
