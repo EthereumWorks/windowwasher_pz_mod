@@ -307,6 +307,91 @@ WindowWasher.ps = {
     moveDuration = 0.5                     -- seconds (UX)
 }
 
+-- Нижний предел спуска платформы: здание состоит из нескольких блоков, и ниже
+-- 16-го этажа геометрия/блоки уже не рассчитаны под мойку — платформу туда не пускаем.
+-- Верхний предел остаётся прежним (естественно ограничен загруженными клетками крыши).
+WindowWasher.minPlatformZ = 16
+
+-- ===== Persist / restore platform state across save-reload =====================
+-- Lua-состояние ps НЕ сохраняется между сессиями, а физические тайлы платформы —
+-- сохраняются вместе с картой. Поэтому геометрию платформы (центр/размер/ориентацию
+-- и снятые родные полы) пишем в глобальный ModData и восстанавливаем при загрузке.
+-- Без этого после выхода и загрузки сейва ps.cx/cy/cz = nil, из-за чего
+-- WW_isPlayerOnControlSquares всегда false → меню «Move Scaffold» исчезает,
+-- а хоткеи (PgUp/PgDn) тихо отклоняют перемещение.
+WindowWasher.PS_MODDATA_KEY = "WindowWasherPlatformState"
+
+function WindowWasher.savePlatformState()
+    local ps = WindowWasher.ps
+    if not (ps.cx and ps.cy and ps.cz) then return end
+    pcall(function()
+        local md = ModData.getOrCreate(WindowWasher.PS_MODDATA_KEY)
+        md.exists = true
+        md.cx, md.cy, md.cz = ps.cx, ps.cy, ps.cz
+        md.size   = ps.size
+        md.orient = ps.orient
+        md.sprite = ps.sprite
+        -- savedFloors: плоская копия (строка->строка), сериализуется без проблем
+        local sf = {}
+        for k, v in pairs(ps.savedFloors or {}) do sf[k] = v end
+        md.savedFloors = sf
+    end)
+end
+
+function WindowWasher.clearPlatformState()
+    pcall(function()
+        local md = ModData.getOrCreate(WindowWasher.PS_MODDATA_KEY)
+        md.exists = false
+        md.cx, md.cy, md.cz = nil, nil, nil
+        md.savedFloors = nil
+    end)
+end
+
+function WindowWasher.restorePlatformState()
+    local ok, restored = pcall(function()
+        local md = ModData.getOrCreate(WindowWasher.PS_MODDATA_KEY)
+        if not md or not md.exists then return false end
+        if not (md.cx and md.cy and md.cz) then return false end
+        local ps = WindowWasher.ps
+        ps.cx, ps.cy, ps.cz = md.cx, md.cy, md.cz
+        ps.size   = md.size   or ps.size
+        ps.orient = md.orient or ps.orient
+        ps.sprite = md.sprite or ps.sprite
+        ps.savedFloors = {}
+        if md.savedFloors then
+            for k, v in pairs(md.savedFloors) do ps.savedFloors[k] = v end
+        end
+        -- живые IsoObject-ссылки не сериализуются — пересоберём, когда клетки прогрузятся
+        ps.objs = {}
+        ps.railObjs = {}
+        return true
+    end)
+    return ok and restored or false
+end
+
+-- Глобальный обработчик загрузки: срабатывает и на новой игре, и на загрузке сейва
+-- (в отличие от WindowWasher.OnGameStart, который вешается только из OnInitWorld нового
+-- мира). На загрузке существующего сейва именно он возвращает работоспособность меню/хоткеев.
+function WindowWasher.restorePlatformStateOnLoad()
+    if not WindowWasher.restorePlatformState() then return end
+    print("[WW] platform state restored from ModData")
+    -- ссылки на живые тайлы (пол/перила) пересобираем, как только клетки платформы
+    -- появятся в загруженном чанке — иначе первый подъём/спуск оставит старые тайлы.
+    local tries = 0
+    local function reacquireWhenLoaded()
+        tries = tries + 1
+        if WindowWasher.reacquirePlatformObjects() then
+            print(("[WW] platform tile refs re-acquired (objs=%d rails=%d)")
+                :format(#WindowWasher.ps.objs, #WindowWasher.ps.railObjs))
+            Events.OnTick.Remove(reacquireWhenLoaded)
+        elseif tries > 600 then  -- ~10 c при 60fps: клетки так и не прогрузились — сдаёмся
+            Events.OnTick.Remove(reacquireWhenLoaded)
+        end
+    end
+    Events.OnTick.Add(reacquireWhenLoaded)
+end
+Events.OnGameStart.Add(WindowWasher.restorePlatformStateOnLoad)
+
 -- ===== Sandbox config =====
 -- Два режима испытания (см. регистрацию внизу файла):
 --   Нормальный  — настройки мира как в Apocalypse (без респауна зомби);
@@ -854,40 +939,26 @@ function WindowWasher.buildRailsAlongLine(cx, cy, cz)
 	if not (WindowWasher.rails and WindowWasher.rails.enabled) then return end
 	local left, right = WW_spanLR(WindowWasher.ps.size)
 
+	-- Перила ставим ТОЛЬКО на внешней стороне (фасад, обращённый от здания).
+	-- Пристенная сторона остаётся полностью открытой: так работала реальная люлька
+	-- мойщика окон — платформа идёт вплотную к стеклу, и со стороны стены ограждение
+	-- штатно отсутствует (см. обсуждение аутентичности). Торцы закрывают buildRailsCaps.
 	if WindowWasher.ps.orient == "EW" then
 		local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.EW) or "S"
 		for x = cx - left, cx + right do
-			-- Перила на внешней стороне (фасад) - декоративные
 			if side == "N" then
 				addFenceN(x, cy, cz, true)  -- декоративные
 			else
 				addFenceN(x, cy + 1, cz, true) -- S = север соседа снизу, декоративные
 			end
-			-- Перила на внутренней стороне (противоположной внешней) - пропускаем средний сегмент
-			if x ~= cx then  -- пропускаем средний тайл (cx)
-				if side == "N" then
-					addFenceN(x, cy + 1, cz, true) -- внутренняя сторона (юг) - декоративные
-				else
-					addFenceN(x, cy, cz, true) -- внутренняя сторона (север) - декоративные
-				end
-			end
 		end
 	else
 		local side = (WindowWasher.railsOuterSide and WindowWasher.railsOuterSide.NS) or "E"
 		for y = cy - left, cy + right do
-			-- Перила на внешней стороне (фасад) - декоративные
 			if side == "W" then
 				addFenceW(cx, y, cz, true)  -- декоративные
 			else
 				addFenceW(cx + 1, y, cz, true) -- E = запад соседа справа, декоративные
-			end
-			-- Перила на внутренней стороне (противоположной внешней) - пропускаем средний сегмент
-			if y ~= cy then  -- пропускаем средний тайл (cy)
-				if side == "W" then
-					addFenceW(cx + 1, y, cz, true) -- внутренняя сторона (восток) - декоративные
-				else
-					addFenceW(cx, y, cz, true) -- внутренняя сторона (запад) - декоративные
-				end
 			end
 		end
 	end
@@ -989,7 +1060,8 @@ function WindowWasher.destroyPlatform()
     WindowWasher.destroyRopes()
     -- вернуть все родные полы, которые были сняты под настил платформы
     WindowWasher.restoreAllNativeFloors()
-
+    -- забываем сохранённое состояние — платформы больше нет
+    WindowWasher.clearPlatformState()
 end
 
 function WindowWasher.buildPlatformAt(cx, cy, cz)
@@ -1013,6 +1085,8 @@ function WindowWasher.buildPlatformAt(cx, cy, cz)
     WindowWasher.buildRailsCaps(cx, cy, cz)
     WindowWasher.buildRopes(cx, cy, cz)
 
+    -- Сохраняем геометрию платформы, чтобы пережить выход/загрузку сейва.
+    WindowWasher.savePlatformState()
 end
 
 -- совместимость с прежним API
@@ -1069,6 +1143,56 @@ local function getPlatformSquares(cx, cy, cz, size, orient)
         end
     end
     return list
+end
+
+-- После загрузки сейва живые объекты ps.objs/railObjs потеряны (Lua-состояние не
+-- сериализуется). Заново собираем ссылки на тайлы настила и перил со клеток платформы
+-- (и их ближайших соседей — перила могут стоять на соседней клетке), чтобы первый же
+-- подъём/спуск после загрузки корректно снёс старые тайлы, а не оставил их «призраками».
+function WindowWasher.reacquirePlatformObjects()
+    local ps = WindowWasher.ps
+    if not (ps.cx and ps.cy and ps.cz) then return false end
+    local squares = getPlatformSquares(ps.cx, ps.cy, ps.cz, ps.size, ps.orient)
+    if #squares == 0 then return false end  -- клетки ещё не загружены
+
+    local floorName = ps.sprite
+    local railN = WindowWasher.rails and WindowWasher.rails.N
+    local railW = WindowWasher.rails and WindowWasher.rails.W
+    ps.objs = {}
+    ps.railObjs = {}
+
+    local function scanSquare(sq)
+        if not sq then return end
+        local objs = sq:getObjects()
+        if not objs then return end
+        for i = 0, objs:size() - 1 do
+            local o = objs:get(i)
+            local spr = o and o:getSprite()
+            local nm = spr and spr:getName()
+            if nm then
+                if nm == floorName then
+                    table.insert(ps.objs, o)
+                elseif nm == railN or nm == railW then
+                    table.insert(ps.railObjs, o)
+                end
+            end
+        end
+    end
+
+    local seen = {}
+    local function addSq(x, y, z)
+        local key = x .. "," .. y .. "," .. z
+        if seen[key] then return end
+        seen[key] = true
+        scanSquare(getSquare(x, y, z))
+    end
+    for _, sq in ipairs(squares) do
+        local x, y, z = sq:getX(), sq:getY(), sq:getZ()
+        addSq(x, y, z)
+        addSq(x + 1, y, z); addSq(x - 1, y, z)
+        addSq(x, y + 1, z); addSq(x, y - 1, z)
+    end
+    return true
 end
 
 -- === CONTROL AREA (две центральные клетки платформы) =========================
@@ -2208,6 +2332,12 @@ function ISMovePlatformAction:perform()
     local ty = WindowWasher.ps.cy + self.dy
     local tz = WindowWasher.ps.cz + self.dz
 
+    if tz < (WindowWasher.minPlatformZ or 0) then
+        print(("WW TA perform ABORT: below min floor z=%d"):format(WindowWasher.minPlatformZ or 0))
+        WindowWasher.ps.moving = false
+        return
+    end
+
     if not squaresExistFor(tx, ty, tz, WindowWasher.ps.size, WindowWasher.ps.orient) then
         print(("WW TA perform ABORT: target squares not loaded %d,%d,%d"):format(tx,ty,tz))
         WindowWasher.ps.moving = false
@@ -2217,6 +2347,13 @@ function ISMovePlatformAction:perform()
     -- Сохраняем старые клетки ручья и старые объекты платформы ДО перестройки
     local ox, oy, oz = WindowWasher.ps.cx, WindowWasher.ps.cy, WindowWasher.ps.cz
     local fromList = getPlatformSquares(ox, oy, oz, WindowWasher.ps.size, WindowWasher.ps.orient)
+
+    -- Подстраховка после загрузки сейва: если ссылки на тайлы потеряны (ps.objs пуст),
+    -- пересобираем их со СТАРЫХ клеток (ps.cx/cy/cz пока ещё указывают на старое место),
+    -- чтобы шаг сноса старого настила/перил ниже отработал, а не оставил призраки.
+    if #WindowWasher.ps.objs == 0 then
+        WindowWasher.reacquirePlatformObjects()
+    end
 
     local function copyList(t) local r = {}; for i=1,#t do r[i]=t[i] end; return r end
     local oldFloors = copyList(WindowWasher.ps.objs)
@@ -2256,6 +2393,10 @@ function ISMovePlatformAction:perform()
         if sq then WindowWasher.restoreNativeFloorAt(sq:getX(), sq:getY(), sq:getZ()) end
     end
 
+    -- Пере-сохраняем состояние: после restoreNativeFloorAt список savedFloors
+    -- актуализировался (записи старых клеток удалены), а центр уже новый.
+    WindowWasher.savePlatformState()
+
     -- Меняем только высоту персонажа, X/Y сохраняем полностью
         local px = self.character:getX()
         local py = self.character:getY()
@@ -2290,6 +2431,15 @@ function WindowWasher.move(dx, dy, dz, playerObj, winchType)
     if not WW_isPlayerOnControlSquares(p) then
         print("WW: move denied (player not on control panel)")
         return
+    end
+
+    -- ⬇️ нижний предел спуска: не опускаемся ниже minPlatformZ (здание из нескольких блоков)
+    if (tonumber(dz) or 0) < 0 then
+        local tz = (WindowWasher.ps.cz or 0) + (tonumber(dz) or 0)
+        if tz < (WindowWasher.minPlatformZ or 0) then
+            print(("WW: move denied (below min floor z=%d)"):format(WindowWasher.minPlatformZ or 0))
+            return
+        end
     end
 
 	-- ⬇️ мгновенный отказ, если сил не хватает для ручной лебёдки
@@ -2329,6 +2479,10 @@ function WindowWasher.moveInstant(dx, dy, dz, playerObj)
     local ty = WindowWasher.ps.cy + dy
     local tz = WindowWasher.ps.cz + dz
     print(("WW moveInstant to %d,%d,%d"):format(tx,ty,tz))
+    if tz < (WindowWasher.minPlatformZ or 0) then
+        print(("WW moveInstant ABORT: below min floor z=%d"):format(WindowWasher.minPlatformZ or 0))
+        return
+    end
     if not squaresExistFor(tx, ty, tz, WindowWasher.ps.size, WindowWasher.ps.orient) then
         print("WW moveInstant ABORT: target not loaded")
         return
@@ -2354,37 +2508,82 @@ end
 
 
 -- ===== Context menu (vertical only) =====
+-- Прикрепляет всплывающую подсказку (ISToolTip) к пункту меню.
+local function WW_attachTip(option, text)
+	if not (option and text) then return end
+	local tip = ISToolTip:new()
+	tip:initialise()
+	tip:setVisible(false)
+	tip.description = text
+	option.toolTip = tip
+end
+
 function WindowWasher.onFillWorldContextMenu(player, context, worldobjects, test)
     if test then return end
     local p = getSpecificPlayer(player); if not p then return end
     if not WindowWasher.isPlayerOnControlSquares(p) then return end
 
-	local root = context:addOption("Move Scaffold")
+	local root = context:addOption(getText("UI_WW_Menu_Move"))
 	local sub  = ISContextMenu:getNew(context); context:addSubMenu(root, sub)
 
-	-- Электро (только если есть электричество)
+	-- На нижнем пределе спуск дальше запрещён (здание из нескольких блоков).
+	local atMinFloor = (WindowWasher.ps.cz or 0) <= (WindowWasher.minPlatformZ or 0)
+
+	-- Электро (только если есть электричество); иначе — информативный disabled-пункт.
 	if WindowWasher.hasElectricityAtWinch and type(WindowWasher.hasElectricityAtWinch) == "function" then
 		if WindowWasher.hasElectricityAtWinch() then
-			sub:addOption("Up (Electric)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "electric")
-			sub:addOption("Down (Electric)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "electric")
+			local up = sub:addOption(getText("UI_WW_Opt_Up_Electric"),   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "electric")
+			local dn = sub:addOption(getText("UI_WW_Opt_Down_Electric"), WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "electric")
+			WW_attachTip(up, getText("UI_WW_Tip_Electric"))
+			if atMinFloor then dn.notAvailable = true end
+			WW_attachTip(dn, getText("UI_WW_Tip_Electric"))
+		else
+			local off = sub:addOption(getText("UI_WW_Opt_Electric_NoPower"))
+			off.notAvailable = true
+			WW_attachTip(off, getText("UI_WW_Tip_NoPower"))
 		end
 	else
 		print("[WW/ELECTRIC] ERROR: hasElectricityAtWinch function not found in context menu!")
 	end
 
 	-- Ручная (всегда доступна)
-	sub:addOption("Up (Manual)",   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "manual")
-	sub:addOption("Down (Manual)", WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "manual")
+	local mu = sub:addOption(getText("UI_WW_Opt_Up_Manual"),   WindowWasher, WindowWasher.moveMenu, 0, 0,  1, p, "manual")
+	local md = sub:addOption(getText("UI_WW_Opt_Down_Manual"), WindowWasher, WindowWasher.moveMenu, 0, 0, -1, p, "manual")
+	WW_attachTip(mu, getText("UI_WW_Tip_Manual"))
+	if atMinFloor then md.notAvailable = true end
+	WW_attachTip(md, getText("UI_WW_Tip_Manual"))
 end
 
 Events.OnFillWorldObjectContextMenu.Add(WindowWasher.onFillWorldContextMenu)
 
--- ===== Hotkeys (PgUp/PgDn) =====
-WindowWasher.keys = { up=Keyboard.KEY_PRIOR, down=Keyboard.KEY_NEXT }
+-- ===== Hotkeys (rebindable, defaults PgUp/PgDn) =====
+-- Стабильные английские идентификаторы — это же строки, по которым getCore():getKey() ищет
+-- назначенную игроком клавишу. Локализовать их НЕЛЬЗЯ: иначе ломается поиск и сохранение.
+WindowWasher.BIND_UP   = "WW: Platform Up"
+WindowWasher.BIND_DOWN = "WW: Platform Down"
+
+-- Регистрируем бинды в меню игры (Options -> Keybindings).
+-- Заголовок-секция + две переназначаемые строки с дефолтами PgUp/PgDn.
+do
+    local WW_keybinds = {
+        { value = "[Window Washer]" },                        -- заголовок секции (PZ детектит по префиксу '[')
+        { value = WindowWasher.BIND_UP,   key = Keyboard.KEY_PRIOR }, -- PgUp
+        { value = WindowWasher.BIND_DOWN, key = Keyboard.KEY_NEXT  }, -- PgDn
+    }
+    for _, v in ipairs(WW_keybinds) do table.insert(keyBinding, v) end
+end
+
+-- Фолбэк на дефолты на случай, если getKey ещё не вернул назначение.
+function WindowWasher.getBoundKey(name, default)
+    local k = getCore():getKey(name)
+    if not k or k == 0 then return default end
+    return k
+end
+
 function WindowWasher.OnKeyPressed(key)
     local p = getPlayer(); if not p then return end
-    if key == WindowWasher.keys.up   then print("WW key: Up");   WindowWasher.move(0,0, 1,p)
-    elseif key == WindowWasher.keys.down then print("WW key: Down"); WindowWasher.move(0,0,-1,p)
+    if     key == WindowWasher.getBoundKey(WindowWasher.BIND_UP,   Keyboard.KEY_PRIOR) then WindowWasher.move(0,0, 1,p)
+    elseif key == WindowWasher.getBoundKey(WindowWasher.BIND_DOWN, Keyboard.KEY_NEXT)  then WindowWasher.move(0,0,-1,p)
     end
 end
 Events.OnKeyPressed.Add(WindowWasher.OnKeyPressed)
@@ -2506,6 +2705,21 @@ function WindowWasher.setupWindowWasherLoadout(playerObj)
     for i = 1, 2 do
         WW_safeAdd(inv, "Base.Rope")
     end
+
+    -- Стартовый блокнот-памятка с инструкцией (текст из Translate/<LANG>/UI.json).
+    -- Base.Notebook: CanBeWrite=true, 10 пустых страниц — занимаем первые 3.
+    local nb = WW_safeAdd(inv, "Base.Notebook")
+    if nb then
+        pcall(function()
+            if nb.addPage then
+                nb:addPage(1, getText("UI_WW_Notebook_P1"))
+                nb:addPage(2, getText("UI_WW_Notebook_P2"))
+                nb:addPage(3, getText("UI_WW_Notebook_P3"))
+            end
+            nb:setName(getText("UI_WW_Notebook_Title"))
+            if nb.setCustomName then nb:setCustomName(true) end
+        end)
+    end
 end
 
 
@@ -2524,6 +2738,11 @@ WindowWasher.AddPlayer = function(playerNum, playerObj)
 
         WindowWasher.setupWindowWasherLoadout(playerObj)
 
+        -- Подсказка по управлению над головой игрока (читается из Translate/UI.json).
+        pcall(function()
+            playerObj:setHaloNote(getText("UI_WW_Hint_Spawn"), 120, 220, 255, 600)
+        end)
+
         print(("WindowWasher: platform ready at %d,%d,%d"):format(cx,cy,cz))
 		Events.OnTick.Remove(delayedTeleport)
 	end
@@ -2539,7 +2758,7 @@ WindowWasher.RemovePlayer = function(_) end
 
 -- ===== Challenge metadata (общие для обоих режимов) =====
 WindowWasher.completionText = "The world ended while you were at work. You’re stuck on a scaffold, outside a skyscraper. Get in. Survive.";
-WindowWasher.image = "media/ui/Challenge_WindowWasher.png";
+WindowWasher.image = "media/ui/WW_Challenge_Preview.png";
 WindowWasher.world = "Muldraugh, KY";
 
 -- spawn coordinates in Louisville
@@ -2568,9 +2787,9 @@ end
 local NORMAL   = makeMode("WindowWasher",   "Window Washer",          WindowWasher.applyNormalSandbox)
 local HARDCORE = makeMode("WindowWasherHC", "Window Washer Hardcore", WindowWasher.applyHardcoreSandbox)
 
--- normal оставляет базовую картинку (Challenge_WindowWasher.png),
+-- normal использует базовую картинку (WW_Challenge_Preview.png),
 -- hardcore — своя картинка
-HARDCORE.image = "media/ui/Challenge_WindowWasher_hard.png";
+HARDCORE.image = "media/ui/WW_Challenge_Preview_Hard.png";
 
 -- ===== Register events =====
 -- НЕ регистрируем OnInitWorld глобально — фреймворк сам вызывает OnInitWorld выбранного
@@ -2579,3 +2798,21 @@ Events.OnChallengeQuery.Add(function()
     addChallenge(NORMAL)
     addChallenge(HARDCORE)
 end)
+
+-- ===== Очистка превью для испытаний без видео =====
+-- Стоковый NewGameScreen:updatePreview() переписывает richText ТОЛЬКО когда у записи
+-- есть и video, и thumb. Поэтому при выборе нашего испытания (video нет) на экране
+-- продолжает крутиться ролик предыдущего выбранного режима. Оборачиваем метод так,
+-- чтобы для записей без видео превью очищалось (paginate() обнуляет self.videos и
+-- останавливает старое воспроизведение).
+require "OptionScreens/NewGameScreen"
+local _WW_oldUpdatePreview = NewGameScreen.updatePreview
+function NewGameScreen:updatePreview()
+    local data = self.selectedItem and self.selectedItem.data
+    if not (data and data.video and data.thumb) then
+        self.richText.text = " "
+        self.richText:paginate()
+        return
+    end
+    return _WW_oldUpdatePreview(self)
+end

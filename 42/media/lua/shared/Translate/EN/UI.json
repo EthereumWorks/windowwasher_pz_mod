@@ -2,5 +2,19 @@
     "UI_prof_WindowWasher": "Window Washer",
     "UI_prof_WindowWasherDesc": "Spent your days dangling off skyscrapers with a squeegee. Heights don't scare you - they keep you sane.",
     "UI_trait_WWHeightLover": "Height Lover",
-    "UI_trait_WWHeightLover_Desc": "You feel at home up high. Time spent at altitude keeps boredom at bay; too long at ground level and the walls start closing in."
+    "UI_trait_WWHeightLover_Desc": "You feel at home up high. Time spent at altitude keeps boredom at bay; too long at ground level and the walls start closing in.",
+    "UI_WW_Hint_Spawn": "Stand on the control panel, then press Page Up / Page Down (or right-click the deck) to move the scaffold.",
+    "UI_WW_Menu_Move": "Move Scaffold",
+    "UI_WW_Opt_Up_Electric": "Up (Electric)",
+    "UI_WW_Opt_Down_Electric": "Down (Electric)",
+    "UI_WW_Opt_Up_Manual": "Up (Manual)",
+    "UI_WW_Opt_Down_Manual": "Down (Manual)",
+    "UI_WW_Opt_Electric_NoPower": "Electric winch — no power",
+    "UI_WW_Tip_Electric": "Fast, costs no stamina. Available only while powered (city grid, or a generator covering the winch).",
+    "UI_WW_Tip_Manual": "Always available. Costs Endurance per floor (going up costs more; overweight makes it worse). Auto-cancels if you're too tired.",
+    "UI_WW_Tip_NoPower": "No power at the winch. Before the blackout use the grid; afterwards run a generator near the outrigger node. Until then, use the manual winch.",
+    "UI_WW_Notebook_Title": "Window Washer's Notebook",
+    "UI_WW_Notebook_P1": "Moving the rig — stand on the center plank of the deck. Nothing moves unless I'm standing on it.\n\n- Page Up = up a floor.\n- Page Down = down a floor.\n- Or right-click the deck -> Move Scaffold.",
+    "UI_WW_Notebook_P2": "The winches —\n\n- Electric. Fast, no sweat. Runs off the building's power. Grid's dead? Hook a generator up near the rig and it's back. No power, no electric.\n\n- Manual. The crank. Always works, never quits. But it wears me out — every floor costs, and going up costs more. Run out of steam and the crank just won't turn. Rest first.",
+    "UI_WW_Notebook_P3": "Funny thing — up here I feel fine. Clear head, no boredom, could hang all day. It's the ground that gets to me: the longer I'm stuck down low, the more the walls close in.\n\nStay high. Stay sane.\n\nWay in is through the windows. Don't look down. Don't fall."
 }
