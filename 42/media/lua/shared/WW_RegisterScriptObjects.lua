@@ -34,13 +34,45 @@ if traitObj then
 end
 
 -- Definition профессии: addCharacterProfessionDefinition(CharacterProfession, uiName, cost, uiDesc, iconPath)
+-- cost = очки, выдаваемые профессией. Раньше было 8; теперь профессия даёт перки
+-- (granted-трейты + Fitness), поэтому бонусных очков не даём — cost = 0.
 if profObj then
     local profDef = safe("addCharacterProfessionDefinition", function()
         return CharacterProfessionDefinition.addCharacterProfessionDefinition(
-            profObj, "UI_prof_WindowWasher", 8, "UI_prof_WindowWasherDesc", "prof_windowwasher")
+            profObj, "UI_prof_WindowWasher", 0, "UI_prof_WindowWasherDesc", "prof_windowwasher")
     end)
-    if profDef and traitObj then
-        safe("profDef:addGrantedTrait", function() return profDef:addGrantedTrait(traitObj) end)
+    if profDef then
+        -- Кастомный трейт Height Lover — выдаётся профессией бесплатно.
+        if traitObj then
+            safe("profDef:addGrantedTrait(heightlover)", function() return profDef:addGrantedTrait(traitObj) end)
+        end
+
+        -- Стартовый фитнес 5 -> 6. XPBoost не влияет на стоимость профессии
+        -- (vanilla-профессии задают Fitness=1 так же).
+        safe("profDef:addXPBoost(Fitness,1)", function()
+            return profDef:addXPBoost(PerkFactory.getPerk(Perks.Fitness), 1)
+        end)
+
+        -- Профильные vanilla-трейты, выдаются профессией бесплатно (granted):
+        -- Brave, Gymnast (Lightfoot+1/Nimble+1), Outdoorsman. Объекты vanilla-
+        -- трейтов уже существуют на этом этапе (скрипты парсятся раньше mod-Lua).
+        -- Стоимость профессии при этом не меняется.
+        local granted = {
+            { name = "BRAVE",       id = "Base.Brave" },
+            { name = "GYMNAST",     id = "Base.Gymnast" },
+            { name = "OUTDOORSMAN", id = "Base.Outdoorsman" },
+        }
+        for _, g in ipairs(granted) do
+            local tr = CharacterTrait[g.name]
+            if tr == nil then
+                tr = safe("CharacterTrait.get(" .. g.id .. ")", function() return CharacterTrait.get(g.id) end)
+            end
+            if tr then
+                safe("profDef:addGrantedTrait(" .. g.name .. ")", function() return profDef:addGrantedTrait(tr) end)
+            else
+                print("[WW/REG] WARN vanilla trait not found: " .. g.name)
+            end
+        end
     end
 end
 
